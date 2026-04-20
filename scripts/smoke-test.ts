@@ -1,63 +1,56 @@
 /**
- * DevNet end-to-end smoke test — Toiki's 2026-04-20 revised plan (v2).
+ * DevNet end-to-end smoke test — Toiki's 2026-04-20 final pre-flight.
  *
- * ## Why this doesn't go through `daml script`
+ * ## Architectural shape (confirmed Signal 2026-04-20)
  *
- * An earlier plan had us driving the TransferInstructionV2 creation via
- * `daml script` against the ledger-API gRPC port. Toiki walked that back
- * mid-session: Splice Token Standard deliberately does not expose TI
- * constructors to `daml script` (HoldingPoolTest.daml:3), so real TI
- * creation requires a 1-2 day Splice API detour, not a smoke test. He
- * stood up a dev-only backend endpoint instead.
+ *   dApp (this harness) ──POST /api/dev/trigger-swap──▶ Helvetswap
+ *                                                          │
+ *                            ┌─────────────────────────────┘
+ *                            ▼
+ *               (server builds self-referential TI,
+ *                SwapPoller + SwapTiProcessor fire,
+ *                AMM reserves update)
+ *                            │
+ *                            ▼
+ *   dApp (this harness) ◀──GET /api/swap/inspect + /api/pools
  *
- * ## Why this uses `app-provider`, not `alice`
+ * The trigger endpoint is `permitAll` on the devnet profile — no auth
+ * header needed. DevNet's real authed endpoints use Ed25519 HMAC, not
+ * Keycloak OAuth2, so a bearer token would be rejected anyway. The
+ * JwtMinter in `src/auth.ts` stays in the SDK surface for Phase 3
+ * (gRPC against ledger-API :5001, where JWT IS the right auth shape).
  *
- * `alice` exists in Keycloak but has no Canton party, no actAs rights,
- * and no Amulet balance. Provisioning her is ~1 week of work for a
- * smoke test. `app-provider` (password `abc123`) exists as a Keycloak
- * user AND a Canton party with actAs + funded Amulet. The endpoint
- * builds a self-referential swap (app-provider → app-provider) —
- * validates SwapPoller + SwapTiProcessor + AMM math without any
- * user-auth complications. User-auth is a Phase 2/3 concern.
+ * ## Why this harness no longer tails logs
+ *
+ * The DevNet SSH key Hugo has is restricted — no-pty, no-agent-
+ * forwarding, permit-open on :5001 + :8082 only. Can't reach :8888
+ * for canton-console, can't open a shell. Toiki tails logs on his side
+ * during the first smoke and pastes log lines back. After that, the
+ * public `/api/swap/inspect` endpoint confirms terminal state per
+ * requestId without any SSH access.
  *
  * ## What this harness does
  *
- *   1. Mint a Keycloak JWT for `app-provider` via the SDK's
- *      `JwtMinter` (public client `app-provider-unsafe`, password
- *      grant, no client_secret).
- *   2. POST the swap request body to
- *      `{HELVETSWAP_BACKEND_URL}/api/dev/trigger-swap` with the JWT
- *      as `Authorization: Bearer`. Body takes `poolId`, not
- *      `poolCid` — endpoint resolves CID server-side.
- *   3. (Optional) SSH into the devnet host and tail the backend log
- *      for `DEV-SWAP`, `SwapPoller`, `SwapTiProcessor` markers keyed
- *      on the returned `requestId`.
- *
- * The harness proves the Helvetswap swap *pipeline* works end-to-end.
- * It does NOT exercise `ZoffProvider`'s wire layer — that's Phase 3,
- * gRPC, still owed.
+ *   1. GET /api/pools — record pool state BEFORE the swap.
+ *   2. POST /api/dev/trigger-swap — get back a requestId.
+ *   3. Poll GET /api/swap/inspect?requestId=<uuid> until the server
+ *      reports a terminal state, or timeout.
+ *   4. GET /api/pools — record pool state AFTER the swap. Diff the
+ *      reserves for a sanity-check that the AMM actually moved.
  *
  * ## Prerequisites
  *
- * - SSH tunnel open (only required if the backend URL is tunnel-local
- *   rather than a public domain, and for the Keycloak call):
- *     ssh -N -T -i ~/.ssh/zoff_devnet_helvetswap \
- *       -L 5001:localhost:5001 \
- *       -L 8082:localhost:8082 \
- *       root@5.9.70.48
- * - `.env.local` populated: AUTH_TEST_PASSWORD=abc123, SYNCHRONIZER_ID,
- *   HELVETSWAP_POOL_ID (from Toiki once the dev endpoint ships),
- *   HELVETSWAP_BACKEND_URL (same).
- * - Optional, only for step 3 (log tail): DEVNET_SSH_HOST +
- *   DEVNET_SSH_KEY. Pass `--skip-log-tail` otherwise.
+ * - Toiki's endpoint deployed on api.helvetswap.app. He'll confirm on
+ *   Signal.
+ * - `.env.local` populated: HELVETSWAP_POOL_ID (default
+ *   `cc-cbtc-showcase`), HELVETSWAP_BACKEND_URL (default
+ *   `https://api.helvetswap.app`). Nothing else is strictly needed.
  *
  * ## Run
  *
  *     npm run smoke
  */
-import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { JwtMinter } from '../src/auth.js';
+import { setTimeout as delay } from 'node:timers/promises';
 
 // ---------------------------------------------------------------------------
 // Config — read from process.env with explicit failures.
@@ -67,7 +60,8 @@ function requireEnv(name: string): string {
   const v = process.env[name];
   if (v === undefined || v === '') {
     throw new Error(
-      `Missing required env var ${name}. Populate .env.local from the Signal drop.`
+      `Missing required env var ${name}. Copy .env.example to .env.local ` +
+        `and fill in any values delivered via Signal.`
     );
   }
   return v;
@@ -81,17 +75,10 @@ function optionalEnv(name: string): string | undefined {
 interface SmokeConfig {
   readonly backendUrl: string;
   readonly poolId: string;
-  readonly auth: {
-    readonly tokenUrl: string;
-    readonly clientId: string;
-    readonly username: string;
-    readonly password: string;
-  };
   readonly direction: 'AtoB' | 'BtoA';
   readonly amountIn: string;
   readonly minOut: string;
-  readonly deadlineMinutes: number;
-  readonly skipLogTail: boolean;
+  readonly inspectTimeoutMs: number;
 }
 
 function loadConfig(): SmokeConfig {
@@ -108,179 +95,169 @@ function loadConfig(): SmokeConfig {
   return {
     backendUrl: requireEnv('HELVETSWAP_BACKEND_URL'),
     poolId: requireEnv('HELVETSWAP_POOL_ID'),
-    auth: {
-      tokenUrl: requireEnv('AUTH_TOKEN_URL'),
-      clientId: requireEnv('AUTH_CLIENT_ID'),
-      username: requireEnv('AUTH_TEST_USERNAME'),
-      password: requireEnv('AUTH_TEST_PASSWORD'),
-    },
     direction,
-    amountIn: optionalEnv('HELVETSWAP_AMOUNT_IN') ?? '1.0',
+    amountIn: optionalEnv('HELVETSWAP_AMOUNT_IN') ?? '0.1',
     minOut: optionalEnv('HELVETSWAP_MIN_OUT') ?? '0.0001',
-    deadlineMinutes: Number(optionalEnv('HELVETSWAP_DEADLINE_MINUTES') ?? '10'),
-    skipLogTail: process.argv.includes('--skip-log-tail'),
+    inspectTimeoutMs:
+      Number(optionalEnv('HELVETSWAP_INSPECT_TIMEOUT_SECONDS') ?? '60') * 1000,
   };
 }
 
 // ---------------------------------------------------------------------------
-// Swap request body.
-//
-// Field names + casing pinned to Toiki's 2026-04-20 Signal revision:
-// `poolId` (not `poolCid` — server resolves), amounts as decimal strings
-// (Decimal-backed server-side), direction case-sensitive exactly 'AtoB'
-// | 'BtoA' (the tracker's historical 'A2B'/'B2A' values are wrong; see
-// the delivery note for the correction).
+// API types — shapes confirmed on Signal 2026-04-20.
 // ---------------------------------------------------------------------------
 
-interface SwapRequest {
+interface TriggerSwapRequest {
   readonly poolId: string;
   readonly direction: 'AtoB' | 'BtoA';
   readonly amountIn: string;
   readonly minOut: string;
-  readonly deadline: string;
 }
 
-interface SwapResponse {
+interface TriggerSwapResponse {
   readonly requestId: string;
   readonly transferInstructionCid: string;
   readonly submittedAt: string;
   readonly estimatedPickupBy?: string;
 }
 
-function buildRequest(cfg: SmokeConfig): SwapRequest {
-  const deadline = new Date(
-    Date.now() + cfg.deadlineMinutes * 60 * 1000
-  ).toISOString();
-  return {
+interface PoolSummary {
+  readonly poolId: string;
+  readonly reserveA: string;
+  readonly reserveB: string;
+  readonly fee?: string;
+  readonly totalLP?: string;
+}
+
+/**
+ * Response shape for `/api/swap/inspect`. The exact state vocabulary
+ * isn't pinned in Toiki's message yet; we treat any of a small set of
+ * string constants as terminal. Unknown states are kept as "pending"
+ * so a future state addition on his side doesn't spuriously fail the
+ * smoke.
+ */
+interface SwapInspectResponse {
+  readonly requestId: string;
+  readonly state?: string;
+  readonly status?: string;
+  readonly amountOut?: string;
+  readonly error?: string;
+  readonly [key: string]: unknown;
+}
+
+// ---------------------------------------------------------------------------
+// HTTP helpers.
+// ---------------------------------------------------------------------------
+
+function joinUrl(base: string, path: string): string {
+  return `${base.replace(/\/$/, '')}${path.startsWith('/') ? path : `/${path}`}`;
+}
+
+async function getJson<T>(url: string): Promise<T> {
+  const response = await fetch(url, { method: 'GET' });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `[smoke] GET ${url} → ${response.status} ${response.statusText}: ${text}`
+    );
+  }
+  return JSON.parse(text) as T;
+}
+
+async function postJson<T>(url: string, body: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `[smoke] POST ${url} → ${response.status} ${response.statusText}: ${text}`
+    );
+  }
+  return JSON.parse(text) as T;
+}
+
+// ---------------------------------------------------------------------------
+// High-level steps.
+// ---------------------------------------------------------------------------
+
+async function readPool(
+  backendUrl: string,
+  poolId: string
+): Promise<PoolSummary | null> {
+  const all = await getJson<PoolSummary[]>(joinUrl(backendUrl, '/api/pools'));
+  return all.find((p) => p.poolId === poolId) ?? null;
+}
+
+async function triggerSwap(
+  cfg: SmokeConfig
+): Promise<TriggerSwapResponse> {
+  const url = joinUrl(cfg.backendUrl, '/api/dev/trigger-swap');
+  const body: TriggerSwapRequest = {
     poolId: cfg.poolId,
     direction: cfg.direction,
     amountIn: cfg.amountIn,
     minOut: cfg.minOut,
-    deadline,
   };
+  return postJson<TriggerSwapResponse>(url, body);
 }
 
-// ---------------------------------------------------------------------------
-// Step 2 — POST to the dev endpoint.
-// ---------------------------------------------------------------------------
+/**
+ * State labels we treat as terminal. Any response with one of these
+ * in `state` or `status` ends the polling loop. Everything else is
+ * "still in flight".
+ */
+const TERMINAL_SUCCESS = new Set([
+  'COMPLETED',
+  'EXECUTED',
+  'CONFIRMED',
+  'SUCCESS',
+]);
+const TERMINAL_FAILURE = new Set([
+  'FAILED',
+  'REJECTED',
+  'EXPIRED',
+  'TIMEOUT',
+  'ERROR',
+]);
 
-async function submitSwap(
-  cfg: SmokeConfig,
-  accessToken: string,
-  body: SwapRequest
-): Promise<SwapResponse> {
-  const url = `${cfg.backendUrl.replace(/\/$/, '')}/api/dev/trigger-swap`;
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    throw new Error(
-      `[smoke] dev-submit endpoint unreachable at ${url}: ${
-        err instanceof Error ? err.message : String(err)
-      }`
-    );
-  }
-
-  const rawText = await response.text();
-  if (!response.ok) {
-    throw new Error(
-      `[smoke] dev-submit failed: ${response.status} ${response.statusText}: ${rawText}`
-    );
-  }
-
-  const parsed = JSON.parse(rawText) as Partial<SwapResponse>;
-  if (
-    typeof parsed.requestId !== 'string' ||
-    typeof parsed.transferInstructionCid !== 'string' ||
-    typeof parsed.submittedAt !== 'string'
-  ) {
-    throw new Error(
-      `[smoke] dev-submit returned malformed body: ${rawText}`
-    );
-  }
-  return parsed as SwapResponse;
+function classifyState(r: SwapInspectResponse): 'success' | 'failure' | 'pending' {
+  const label = (r.state ?? r.status ?? '').toUpperCase();
+  if (TERMINAL_SUCCESS.has(label)) return 'success';
+  if (TERMINAL_FAILURE.has(label)) return 'failure';
+  return 'pending';
 }
 
-// ---------------------------------------------------------------------------
-// Step 3 — tail the Helvetswap backend log over SSH.
-// ---------------------------------------------------------------------------
-
-interface LogWatchResult {
-  readonly submitted: boolean;
-  readonly polled: boolean;
-  readonly completed: boolean;
-  readonly errored: boolean;
-  readonly lastErrorLine: string | null;
-}
-
-async function watchBackendLog(
+async function pollInspect(
+  backendUrl: string,
   requestId: string,
   timeoutMs: number
-): Promise<LogWatchResult> {
-  const sshHost = requireEnv('DEVNET_SSH_HOST');
-  const sshKey = optionalEnv('DEVNET_SSH_KEY') ?? '~/.ssh/zoff_devnet_helvetswap';
-  const grepCmd =
-    "docker compose -p quickstart logs --tail=500 backend-service | " +
-    "grep -E 'DEV-SWAP|SwapPoller|SwapTiProcessor' | tail -100";
-
-  const result: {
-    submitted: boolean;
-    polled: boolean;
-    completed: boolean;
-    errored: boolean;
-    lastErrorLine: string | null;
-  } = {
-    submitted: false,
-    polled: false,
-    completed: false,
-    errored: false,
-    lastErrorLine: null,
-  };
-
+): Promise<SwapInspectResponse> {
+  const url = joinUrl(
+    backendUrl,
+    `/api/swap/inspect?requestId=${encodeURIComponent(requestId)}`
+  );
   const deadline = Date.now() + timeoutMs;
+  let last: SwapInspectResponse | null = null;
 
   while (Date.now() < deadline) {
-    const output = await new Promise<string>((resolve, reject) => {
-      const child = spawn(
-        'ssh',
-        ['-i', sshKey, '-o', 'BatchMode=yes', sshHost, grepCmd],
-        { stdio: ['ignore', 'pipe', 'pipe'] }
-      );
-      let stdout = '';
-      child.stdout.on('data', (chunk) => {
-        stdout += String(chunk);
-      });
-      child.on('error', reject);
-      child.on('exit', () => resolve(stdout));
-    });
-
-    for (const line of output.split('\n')) {
-      if (!line.includes(requestId)) continue;
-      if (line.includes('DEV-SWAP')) result.submitted = true;
-      if (line.includes('[SwapPoller] Processing')) result.polled = true;
-      if (line.includes('[SwapPoller] Swap completed')) result.completed = true;
-      if (
-        line.includes('[SwapPoller] Swap failed') ||
-        /\[SwapTiProcessor\].*error/i.test(line)
-      ) {
-        result.errored = true;
-        result.lastErrorLine = line.trim();
-      }
+    try {
+      last = await getJson<SwapInspectResponse>(url);
+    } catch (err) {
+      // Endpoint may 404 briefly after submission before the record
+      // is indexed. Retry rather than bail.
+      last = { requestId, state: 'UNKNOWN_FETCH_ERROR', error: String(err) };
     }
-
-    if (result.completed || result.errored) break;
-    await new Promise((r) => setTimeout(r, 2_000));
+    const verdict = classifyState(last);
+    if (verdict !== 'pending') return last;
+    await delay(2000);
   }
 
-  return result;
+  return (
+    last ?? { requestId, state: 'POLL_TIMEOUT', error: 'no response collected' }
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -290,63 +267,74 @@ async function watchBackendLog(
 async function main(): Promise<void> {
   const cfg = loadConfig();
 
-  console.log('[smoke] 1/3 — mint Keycloak JWT for app-provider');
-  const minter = new JwtMinter(cfg.auth);
-  const accessToken = await minter.getToken();
-  console.log(`[smoke]        got token (len=${accessToken.length})`);
-
-  const body = buildRequest(cfg);
   console.log(
-    `[smoke] 2/3 — POST ${cfg.backendUrl}/api/dev/trigger-swap`,
-    JSON.stringify(body)
+    `[smoke] config: backend=${cfg.backendUrl} pool=${cfg.poolId} dir=${cfg.direction} in=${cfg.amountIn} minOut=${cfg.minOut}`
   );
-  const response = await submitSwap(cfg, accessToken, body);
+
+  console.log('[smoke] 1/4 — read pool reserves BEFORE swap');
+  const before = await readPool(cfg.backendUrl, cfg.poolId);
+  if (before === null) {
+    throw new Error(
+      `[smoke] FAIL — pool ${cfg.poolId} not found at ${cfg.backendUrl}/api/pools. ` +
+        `Toiki may have re-seeded; ping Signal for the new pool id.`
+    );
+  }
   console.log(
-    `[smoke]        submit OK — requestId=${response.requestId}, ` +
-      `tiCid=${response.transferInstructionCid}, submittedAt=${response.submittedAt}`
+    `[smoke]        before: reserveA=${before.reserveA} reserveB=${before.reserveB}`
   );
-  // Reference so linter doesn't complain the random UUID helper is unused
-  // while this file is mid-flight; it's kept for future memo-payload work.
-  void randomUUID;
 
-  if (cfg.skipLogTail) {
-    console.log('[smoke] 3/3 — SKIPPED backend log tail (--skip-log-tail)');
-    console.log('[smoke] done (submit leg only)');
-    return;
-  }
-
+  console.log('[smoke] 2/4 — POST /api/dev/trigger-swap');
+  const triggered = await triggerSwap(cfg);
   console.log(
-    '[smoke] 3/3 — tail Helvetswap backend log for DEV-SWAP / SwapPoller / SwapTiProcessor'
+    `[smoke]        requestId=${triggered.requestId} tiCid=${triggered.transferInstructionCid} submittedAt=${triggered.submittedAt}`
   );
-  const watched = await watchBackendLog(response.requestId, 60_000);
 
-  if (!watched.submitted) {
+  console.log(
+    `[smoke] 3/4 — poll /api/swap/inspect (timeout ${cfg.inspectTimeoutMs / 1000}s)`
+  );
+  const inspect = await pollInspect(
+    cfg.backendUrl,
+    triggered.requestId,
+    cfg.inspectTimeoutMs
+  );
+  const verdict = classifyState(inspect);
+  console.log(
+    `[smoke]        verdict=${verdict} payload=${JSON.stringify(inspect)}`
+  );
+
+  console.log('[smoke] 4/4 — read pool reserves AFTER swap');
+  const after = await readPool(cfg.backendUrl, cfg.poolId);
+  if (after !== null) {
+    console.log(
+      `[smoke]        after:  reserveA=${after.reserveA} reserveB=${after.reserveB}`
+    );
+    const deltaA = Number(after.reserveA) - Number(before.reserveA);
+    const deltaB = Number(after.reserveB) - Number(before.reserveB);
+    console.log(
+      `[smoke]        delta:  reserveA=${deltaA.toFixed(10)} reserveB=${deltaB.toFixed(10)}`
+    );
+    if (verdict === 'success' && deltaA === 0 && deltaB === 0) {
+      throw new Error(
+        '[smoke] FAIL — inspect reports success but reserves did not move. ' +
+          'AMM state is inconsistent with the submit; ping Toiki.'
+      );
+    }
+  }
+
+  if (verdict === 'failure') {
     throw new Error(
-      '[smoke] FAIL — DEV-SWAP marker never logged. ' +
-        'Endpoint may have accepted the request but not fired its submission handler. ' +
-        'Ping Toiki with this requestId: ' +
-        response.requestId
+      `[smoke] FAIL — swap terminal-failed. requestId=${triggered.requestId} payload=${JSON.stringify(inspect)}`
     );
   }
-  if (watched.errored) {
+  if (verdict === 'pending') {
     throw new Error(
-      `[smoke] FAIL — backend errored. Last line: ${watched.lastErrorLine}`
-    );
-  }
-  if (!watched.polled) {
-    throw new Error(
-      '[smoke] FAIL — SwapPoller never picked up the TI despite DEV-SWAP marker. ' +
-        'Handover §6 row 1: check receiver party + memo shape.'
-    );
-  }
-  if (!watched.completed) {
-    throw new Error(
-      '[smoke] FAIL — SwapPoller picked up the TI but swap did not complete in the window.'
+      `[smoke] FAIL — poll timed out without a terminal state. ` +
+        `requestId=${triggered.requestId} last=${JSON.stringify(inspect)}`
     );
   }
 
   console.log(
-    `[smoke] PASS — full pipeline fired: DEV-SWAP → SwapPoller → SwapTiProcessor — requestId=${response.requestId}`
+    `[smoke] PASS — full pipeline fired: trigger → poller → processor — requestId=${triggered.requestId}`
   );
 }
 
