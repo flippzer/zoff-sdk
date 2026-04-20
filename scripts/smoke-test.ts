@@ -1,46 +1,52 @@
 /**
- * DevNet end-to-end smoke test — Toiki's 2026-04-20 revised plan.
+ * DevNet end-to-end smoke test — Toiki's 2026-04-20 revised plan (v2).
  *
  * ## Why this doesn't go through `daml script`
  *
  * An earlier plan had us driving the TransferInstructionV2 creation via
  * `daml script` against the ledger-API gRPC port. Toiki walked that back
- * on Signal later the same day (see `DevNet bring-up — Hugo delivery —
- * 2026-04-20.md` for the full context): Splice Token Standard
- * deliberately does not expose TI constructors to `daml script`, so
- * real TI creation requires a 1-2 day Splice API detour, not a smoke
- * test. He stood up a dev-only backend endpoint instead:
+ * mid-session: Splice Token Standard deliberately does not expose TI
+ * constructors to `daml script` (HoldingPoolTest.daml:3), so real TI
+ * creation requires a 1-2 day Splice API detour, not a smoke test. He
+ * stood up a dev-only backend endpoint instead.
  *
- *     POST /api/dev/submit-swap-ti
+ * ## Why this uses `app-provider`, not `alice`
  *
- * Gated by `@Profile("devnet")` — cannot leak to mainnet. It reuses
- * Helvetswap's existing Daml Java bindings to create the TI as the
- * JWT-bearer party (token-forwarding pattern), returns the new TI
- * contract id + request id.
+ * `alice` exists in Keycloak but has no Canton party, no actAs rights,
+ * and no Amulet balance. Provisioning her is ~1 week of work for a
+ * smoke test. `app-provider` (password `abc123`) exists as a Keycloak
+ * user AND a Canton party with actAs + funded Amulet. The endpoint
+ * builds a self-referential swap (app-provider → app-provider) —
+ * validates SwapPoller + SwapTiProcessor + AMM math without any
+ * user-auth complications. User-auth is a Phase 2/3 concern.
  *
  * ## What this harness does
  *
- *   1. Mint a Keycloak JWT for `alice` via the SDK's `JwtMinter`.
- *   2. POST the canonical swap request body to
- *      `{HELVETSWAP_BACKEND_URL}/api/dev/submit-swap-ti` with that JWT.
+ *   1. Mint a Keycloak JWT for `app-provider` via the SDK's
+ *      `JwtMinter` (public client `app-provider-unsafe`, password
+ *      grant, no client_secret).
+ *   2. POST the swap request body to
+ *      `{HELVETSWAP_BACKEND_URL}/api/dev/trigger-swap` with the JWT
+ *      as `Authorization: Bearer`. Body takes `poolId`, not
+ *      `poolCid` — endpoint resolves CID server-side.
  *   3. (Optional) SSH into the devnet host and tail the backend log
- *      for the `DEV-SWAP`, `SwapPoller`, `SwapTiProcessor` markers
- *      tied to the request id we just got back.
+ *      for `DEV-SWAP`, `SwapPoller`, `SwapTiProcessor` markers keyed
+ *      on the returned `requestId`.
  *
- * The harness proves the Helvetswap swap *contract* works end-to-end.
+ * The harness proves the Helvetswap swap *pipeline* works end-to-end.
  * It does NOT exercise `ZoffProvider`'s wire layer — that's Phase 3,
  * gRPC, still owed.
  *
  * ## Prerequisites
  *
- * - SSH tunnel open (only required for step 1's Keycloak call unless
- *   Toiki publishes the realm's issuer over public DNS):
+ * - SSH tunnel open (only required if the backend URL is tunnel-local
+ *   rather than a public domain, and for the Keycloak call):
  *     ssh -N -T -i ~/.ssh/zoff_devnet_helvetswap \
  *       -L 5001:localhost:5001 \
  *       -L 8082:localhost:8082 \
  *       root@5.9.70.48
- * - `.env.local` populated: AUTH_TEST_PASSWORD=alice123, SYNCHRONIZER_ID,
- *   HELVETSWAP_POOL_CID (from Toiki once the dev endpoint ships),
+ * - `.env.local` populated: AUTH_TEST_PASSWORD=abc123, SYNCHRONIZER_ID,
+ *   HELVETSWAP_POOL_ID (from Toiki once the dev endpoint ships),
  *   HELVETSWAP_BACKEND_URL (same).
  * - Optional, only for step 3 (log tail): DEVNET_SSH_HOST +
  *   DEVNET_SSH_KEY. Pass `--skip-log-tail` otherwise.
@@ -74,7 +80,7 @@ function optionalEnv(name: string): string | undefined {
 
 interface SmokeConfig {
   readonly backendUrl: string;
-  readonly poolCid: string;
+  readonly poolId: string;
   readonly auth: {
     readonly tokenUrl: string;
     readonly clientId: string;
@@ -101,7 +107,7 @@ function loadConfig(): SmokeConfig {
 
   return {
     backendUrl: requireEnv('HELVETSWAP_BACKEND_URL'),
-    poolCid: requireEnv('HELVETSWAP_POOL_CID'),
+    poolId: requireEnv('HELVETSWAP_POOL_ID'),
     auth: {
       tokenUrl: requireEnv('AUTH_TOKEN_URL'),
       clientId: requireEnv('AUTH_CLIENT_ID'),
@@ -119,14 +125,15 @@ function loadConfig(): SmokeConfig {
 // ---------------------------------------------------------------------------
 // Swap request body.
 //
-// Field names + casing pinned to Toiki's 2026-04-20 Signal message.
-// Amounts are decimal strings (Decimal-backed server-side). Direction is
-// case-sensitive exactly 'AtoB' | 'BtoA' — the tracker's historical
-// 'A2B'/'B2A' values are wrong; see the delivery note for the correction.
+// Field names + casing pinned to Toiki's 2026-04-20 Signal revision:
+// `poolId` (not `poolCid` — server resolves), amounts as decimal strings
+// (Decimal-backed server-side), direction case-sensitive exactly 'AtoB'
+// | 'BtoA' (the tracker's historical 'A2B'/'B2A' values are wrong; see
+// the delivery note for the correction).
 // ---------------------------------------------------------------------------
 
 interface SwapRequest {
-  readonly poolCid: string;
+  readonly poolId: string;
   readonly direction: 'AtoB' | 'BtoA';
   readonly amountIn: string;
   readonly minOut: string;
@@ -145,7 +152,7 @@ function buildRequest(cfg: SmokeConfig): SwapRequest {
     Date.now() + cfg.deadlineMinutes * 60 * 1000
   ).toISOString();
   return {
-    poolCid: cfg.poolCid,
+    poolId: cfg.poolId,
     direction: cfg.direction,
     amountIn: cfg.amountIn,
     minOut: cfg.minOut,
@@ -162,7 +169,7 @@ async function submitSwap(
   accessToken: string,
   body: SwapRequest
 ): Promise<SwapResponse> {
-  const url = `${cfg.backendUrl.replace(/\/$/, '')}/api/dev/submit-swap-ti`;
+  const url = `${cfg.backendUrl.replace(/\/$/, '')}/api/dev/trigger-swap`;
 
   let response: Response;
   try {
@@ -283,14 +290,14 @@ async function watchBackendLog(
 async function main(): Promise<void> {
   const cfg = loadConfig();
 
-  console.log('[smoke] 1/3 — mint Keycloak JWT for alice');
+  console.log('[smoke] 1/3 — mint Keycloak JWT for app-provider');
   const minter = new JwtMinter(cfg.auth);
   const accessToken = await minter.getToken();
   console.log(`[smoke]        got token (len=${accessToken.length})`);
 
   const body = buildRequest(cfg);
   console.log(
-    `[smoke] 2/3 — POST ${cfg.backendUrl}/api/dev/submit-swap-ti`,
+    `[smoke] 2/3 — POST ${cfg.backendUrl}/api/dev/trigger-swap`,
     JSON.stringify(body)
   );
   const response = await submitSwap(cfg, accessToken, body);
