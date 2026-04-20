@@ -1,46 +1,60 @@
 /**
- * DevNet end-to-end smoke test — Toiki's handover §4, path 1.
+ * DevNet end-to-end smoke test — Toiki's 2026-04-20 revised plan.
  *
- * Architectural note: this script DOES NOT exercise `ZoffProvider`'s
- * wire layer. That's intentional and aligned with Toiki's 2026-04-20
- * Signal response: the smoke test's job is to validate the
- * *Helvetswap swap pipeline contract* (memo schema, TI shape,
- * SwapPoller/SwapTiProcessor fire), not the SDK's gRPC client. The
- * gRPC client lands in Phase 3.
+ * ## Why this doesn't go through `daml script`
  *
- * So this harness:
- *   1. Mints a Keycloak JWT for `alice` via the SDK's `JwtMinter`.
- *   2. Runs `daml script` as a subprocess, passing the JWT and the
- *      canonical memo JSON through to the public Daml SDK's submit
- *      flow against `localhost:5001` (ledger-API gRPC, SSH-tunneled).
- *   3. Tails the Helvetswap backend log over SSH and asserts the
- *      expected `SwapPoller` / `SwapTiProcessor` lines fire within
- *      the synchronizer commit window (~10s).
+ * An earlier plan had us driving the TransferInstructionV2 creation via
+ * `daml script` against the ledger-API gRPC port. Toiki walked that back
+ * on Signal later the same day (see `DevNet bring-up — Hugo delivery —
+ * 2026-04-20.md` for the full context): Splice Token Standard
+ * deliberately does not expose TI constructors to `daml script`, so
+ * real TI creation requires a 1-2 day Splice API detour, not a smoke
+ * test. He stood up a dev-only backend endpoint instead:
  *
- * Prerequisites on the laptop running this:
- *   - SSH tunnel open:
- *       ssh -N -T -i ~/.ssh/zoff_devnet_helvetswap \
- *         -L 5001:localhost:5001 \
- *         -L 8082:localhost:8082 \
- *         root@5.9.70.48
- *   - `.env.local` populated with AUTH_TEST_PASSWORD, SYNCHRONIZER_ID
- *     (both Signal-delivered).
- *   - Daml SDK installed (`curl -sSL https://get.daml.com/ | sh`).
- *   - SSH access to devnet host for the log-tail step, OR pass
- *     `--skip-log-tail` to only drive the submit half.
+ *     POST /api/dev/submit-swap-ti
  *
- * Run:
- *   npm run smoke
+ * Gated by `@Profile("devnet")` — cannot leak to mainnet. It reuses
+ * Helvetswap's existing Daml Java bindings to create the TI as the
+ * JWT-bearer party (token-forwarding pattern), returns the new TI
+ * contract id + request id.
+ *
+ * ## What this harness does
+ *
+ *   1. Mint a Keycloak JWT for `alice` via the SDK's `JwtMinter`.
+ *   2. POST the canonical swap request body to
+ *      `{HELVETSWAP_BACKEND_URL}/api/dev/submit-swap-ti` with that JWT.
+ *   3. (Optional) SSH into the devnet host and tail the backend log
+ *      for the `DEV-SWAP`, `SwapPoller`, `SwapTiProcessor` markers
+ *      tied to the request id we just got back.
+ *
+ * The harness proves the Helvetswap swap *contract* works end-to-end.
+ * It does NOT exercise `ZoffProvider`'s wire layer — that's Phase 3,
+ * gRPC, still owed.
+ *
+ * ## Prerequisites
+ *
+ * - SSH tunnel open (only required for step 1's Keycloak call unless
+ *   Toiki publishes the realm's issuer over public DNS):
+ *     ssh -N -T -i ~/.ssh/zoff_devnet_helvetswap \
+ *       -L 5001:localhost:5001 \
+ *       -L 8082:localhost:8082 \
+ *       root@5.9.70.48
+ * - `.env.local` populated: AUTH_TEST_PASSWORD=alice123, SYNCHRONIZER_ID,
+ *   HELVETSWAP_POOL_CID (from Toiki once the dev endpoint ships),
+ *   HELVETSWAP_BACKEND_URL (same).
+ * - Optional, only for step 3 (log tail): DEVNET_SSH_HOST +
+ *   DEVNET_SSH_KEY. Pass `--skip-log-tail` otherwise.
+ *
+ * ## Run
+ *
+ *     npm run smoke
  */
 import { spawn } from 'node:child_process';
-import { mkdtemp, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { JwtMinter } from '../src/auth.js';
 
 // ---------------------------------------------------------------------------
-// Config helpers — read from process.env with explicit failures.
+// Config — read from process.env with explicit failures.
 // ---------------------------------------------------------------------------
 
 function requireEnv(name: string): string {
@@ -59,151 +73,133 @@ function optionalEnv(name: string): string | undefined {
 }
 
 interface SmokeConfig {
-  readonly ledgerHost: string;
-  readonly ledgerPort: number;
-  readonly synchronizerId: string;
-  readonly operatorPartyId: string;
-  readonly alicePartyId: string;
+  readonly backendUrl: string;
+  readonly poolCid: string;
   readonly auth: {
     readonly tokenUrl: string;
     readonly clientId: string;
     readonly username: string;
     readonly password: string;
   };
-  readonly damlScriptPath?: string;
+  readonly direction: 'AtoB' | 'BtoA';
+  readonly amountIn: string;
+  readonly minOut: string;
+  readonly deadlineMinutes: number;
   readonly skipLogTail: boolean;
 }
 
 function loadConfig(): SmokeConfig {
+  const direction = (optionalEnv('HELVETSWAP_DIRECTION') ?? 'AtoB') as
+    | 'AtoB'
+    | 'BtoA';
+  if (direction !== 'AtoB' && direction !== 'BtoA') {
+    throw new Error(
+      `HELVETSWAP_DIRECTION must be exactly 'AtoB' or 'BtoA' ` +
+        `(case-sensitive per SwapTiProcessorService.java:1203). Got '${direction}'.`
+    );
+  }
+
   return {
-    ledgerHost: requireEnv('LEDGER_API_HOST'),
-    ledgerPort: Number(requireEnv('LEDGER_API_PORT')),
-    synchronizerId: requireEnv('SYNCHRONIZER_ID'),
-    operatorPartyId: requireEnv('OPERATOR_PARTY_ID'),
-    alicePartyId: requireEnv('ZOFF_TEST_PARTY_ID'),
+    backendUrl: requireEnv('HELVETSWAP_BACKEND_URL'),
+    poolCid: requireEnv('HELVETSWAP_POOL_CID'),
     auth: {
       tokenUrl: requireEnv('AUTH_TOKEN_URL'),
       clientId: requireEnv('AUTH_CLIENT_ID'),
       username: requireEnv('AUTH_TEST_USERNAME'),
       password: requireEnv('AUTH_TEST_PASSWORD'),
     },
-    ...(optionalEnv('DAML_SCRIPT_PATH') !== undefined
-      ? { damlScriptPath: optionalEnv('DAML_SCRIPT_PATH') as string }
-      : {}),
+    direction,
+    amountIn: optionalEnv('HELVETSWAP_AMOUNT_IN') ?? '1.0',
+    minOut: optionalEnv('HELVETSWAP_MIN_OUT') ?? '0.0001',
+    deadlineMinutes: Number(optionalEnv('HELVETSWAP_DEADLINE_MINUTES') ?? '10'),
     skipLogTail: process.argv.includes('--skip-log-tail'),
   };
 }
 
 // ---------------------------------------------------------------------------
-// Step 1 — canonical memo per handover §5.
+// Swap request body.
+//
+// Field names + casing pinned to Toiki's 2026-04-20 Signal message.
+// Amounts are decimal strings (Decimal-backed server-side). Direction is
+// case-sensitive exactly 'AtoB' | 'BtoA' — the tracker's historical
+// 'A2B'/'B2A' values are wrong; see the delivery note for the correction.
 // ---------------------------------------------------------------------------
 
-function buildMemo(
-  operatorPartyId: string,
-  opts: { requestId?: string; poolCid?: string } = {}
-): string {
-  const deadline = new Date(Date.now() + 5 * 60 * 1000).toISOString();
-  const memo = {
-    v: 1,
-    requestId: opts.requestId ?? randomUUID(),
-    poolCid: opts.poolCid ?? '<set-via-toiki-daml-script-sample>',
-    direction: 'A2B',
-    minOut: '0',
-    receiverParty: operatorPartyId,
+interface SwapRequest {
+  readonly poolCid: string;
+  readonly direction: 'AtoB' | 'BtoA';
+  readonly amountIn: string;
+  readonly minOut: string;
+  readonly deadline: string;
+}
+
+interface SwapResponse {
+  readonly requestId: string;
+  readonly transferInstructionCid: string;
+  readonly submittedAt: string;
+  readonly estimatedPickupBy?: string;
+}
+
+function buildRequest(cfg: SmokeConfig): SwapRequest {
+  const deadline = new Date(
+    Date.now() + cfg.deadlineMinutes * 60 * 1000
+  ).toISOString();
+  return {
+    poolCid: cfg.poolCid,
+    direction: cfg.direction,
+    amountIn: cfg.amountIn,
+    minOut: cfg.minOut,
     deadline,
   };
-  return JSON.stringify(memo);
 }
 
 // ---------------------------------------------------------------------------
-// Step 2 — run the daml-script subprocess.
+// Step 2 — POST to the dev endpoint.
 // ---------------------------------------------------------------------------
-//
-// Populated once Toiki shares the canonical script. Expected shape:
-//
-//   daml script \
-//     --dar <path-to-dar-with-TransferInstructionV2> \
-//     --script-name Zoff.Smoke:submitTransferTi \
-//     --ledger-host localhost --ledger-port 5001 \
-//     --access-token-file <tmp-token-file> \
-//     --input-file <tmp-args-file> \
-//     --output-file <tmp-result-file>
-//
-// Args passed into the script (JSON):
-//   { sender: alice, receiver: operator, memo: <canonical-JSON>, synchronizerId }
-//
-// The actual `.dar` build + script upload is Toiki-owned; our job here is
-// to pass through the values cleanly.
 
-async function runDamlScript(
+async function submitSwap(
   cfg: SmokeConfig,
   accessToken: string,
-  memo: string
-): Promise<{ updateId: string; durationMs: number }> {
-  if (cfg.damlScriptPath === undefined) {
-    throw new Error(
-      'DAML_SCRIPT_PATH is not set — cannot run the smoke submit. ' +
-        'Toiki is sending the canonical `.daml` script path via Signal; ' +
-        'drop it in .env.local once received.'
-    );
-  }
+  body: SwapRequest
+): Promise<SwapResponse> {
+  const url = `${cfg.backendUrl.replace(/\/$/, '')}/api/dev/submit-swap-ti`;
 
-  const workDir = await mkdtemp(join(tmpdir(), 'zoff-smoke-'));
-  const tokenFile = join(workDir, 'token');
-  const argsFile = join(workDir, 'args.json');
-  const outputFile = join(workDir, 'result.json');
-
+  let response: Response;
   try {
-    await writeFile(tokenFile, accessToken, 'utf8');
-    await writeFile(
-      argsFile,
-      JSON.stringify({
-        sender: cfg.alicePartyId,
-        receiver: cfg.operatorPartyId,
-        synchronizerId: cfg.synchronizerId,
-        memo,
-      }),
-      'utf8'
-    );
-
-    const startedAt = Date.now();
-    const damlArgs = [
-      'script',
-      '--dar',
-      cfg.damlScriptPath,
-      '--script-name',
-      'Zoff.Smoke:submitTransferTi',
-      '--ledger-host',
-      cfg.ledgerHost,
-      '--ledger-port',
-      String(cfg.ledgerPort),
-      '--access-token-file',
-      tokenFile,
-      '--input-file',
-      argsFile,
-      '--output-file',
-      outputFile,
-    ];
-
-    await new Promise<void>((resolve, reject) => {
-      const child = spawn('daml', damlArgs, { stdio: 'inherit' });
-      child.on('error', reject);
-      child.on('exit', (code) => {
-        if (code === 0) resolve();
-        else reject(new Error(`daml script exited with code ${code}`));
-      });
+    response = await fetch(url, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(body),
     });
-
-    const rawResult = await (await import('node:fs/promises')).readFile(outputFile, 'utf8');
-    const parsed = JSON.parse(rawResult) as { updateId?: string };
-    if (typeof parsed.updateId !== 'string') {
-      throw new Error(`daml script output missing updateId: ${rawResult}`);
-    }
-
-    return { updateId: parsed.updateId, durationMs: Date.now() - startedAt };
-  } finally {
-    await rm(workDir, { recursive: true, force: true });
+  } catch (err) {
+    throw new Error(
+      `[smoke] dev-submit endpoint unreachable at ${url}: ${
+        err instanceof Error ? err.message : String(err)
+      }`
+    );
   }
+
+  const rawText = await response.text();
+  if (!response.ok) {
+    throw new Error(
+      `[smoke] dev-submit failed: ${response.status} ${response.statusText}: ${rawText}`
+    );
+  }
+
+  const parsed = JSON.parse(rawText) as Partial<SwapResponse>;
+  if (
+    typeof parsed.requestId !== 'string' ||
+    typeof parsed.transferInstructionCid !== 'string' ||
+    typeof parsed.submittedAt !== 'string'
+  ) {
+    throw new Error(
+      `[smoke] dev-submit returned malformed body: ${rawText}`
+    );
+  }
+  return parsed as SwapResponse;
 }
 
 // ---------------------------------------------------------------------------
@@ -211,33 +207,34 @@ async function runDamlScript(
 // ---------------------------------------------------------------------------
 
 interface LogWatchResult {
+  readonly submitted: boolean;
   readonly polled: boolean;
   readonly completed: boolean;
   readonly errored: boolean;
-  readonly lastRequestId: string | null;
   readonly lastErrorLine: string | null;
 }
 
 async function watchBackendLog(
-  timeoutMs: number = 30_000
+  requestId: string,
+  timeoutMs: number
 ): Promise<LogWatchResult> {
   const sshHost = requireEnv('DEVNET_SSH_HOST');
   const sshKey = optionalEnv('DEVNET_SSH_KEY') ?? '~/.ssh/zoff_devnet_helvetswap';
   const grepCmd =
-    "docker compose -p quickstart logs --tail=200 backend-service | " +
-    "grep -E 'SwapPoller|SwapTiProcessor' | tail -50";
+    "docker compose -p quickstart logs --tail=500 backend-service | " +
+    "grep -E 'DEV-SWAP|SwapPoller|SwapTiProcessor' | tail -100";
 
   const result: {
+    submitted: boolean;
     polled: boolean;
     completed: boolean;
     errored: boolean;
-    lastRequestId: string | null;
     lastErrorLine: string | null;
   } = {
+    submitted: false,
     polled: false,
     completed: false,
     errored: false,
-    lastRequestId: null,
     lastErrorLine: null,
   };
 
@@ -259,15 +256,14 @@ async function watchBackendLog(
     });
 
     for (const line of output.split('\n')) {
-      const processingMatch = line.match(/\[SwapPoller\] Processing swap requestId=(\S+)/);
-      if (processingMatch !== null) {
-        result.polled = true;
-        result.lastRequestId = processingMatch[1] ?? null;
-      }
-      if (/\[SwapPoller\] Swap completed/.test(line)) {
-        result.completed = true;
-      }
-      if (/\[SwapPoller\] Swap failed/.test(line) || /\[SwapTiProcessor\].*error/i.test(line)) {
+      if (!line.includes(requestId)) continue;
+      if (line.includes('DEV-SWAP')) result.submitted = true;
+      if (line.includes('[SwapPoller] Processing')) result.polled = true;
+      if (line.includes('[SwapPoller] Swap completed')) result.completed = true;
+      if (
+        line.includes('[SwapPoller] Swap failed') ||
+        /\[SwapTiProcessor\].*error/i.test(line)
+      ) {
         result.errored = true;
         result.lastErrorLine = line.trim();
       }
@@ -281,53 +277,69 @@ async function watchBackendLog(
 }
 
 // ---------------------------------------------------------------------------
-// Main — runs §4 steps 1-6 in order, reports a clear final verdict.
+// Main.
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
   const cfg = loadConfig();
 
-  console.log('[smoke] 1/4 — mint Keycloak JWT for alice');
+  console.log('[smoke] 1/3 — mint Keycloak JWT for alice');
   const minter = new JwtMinter(cfg.auth);
   const accessToken = await minter.getToken();
   console.log(`[smoke]        got token (len=${accessToken.length})`);
 
-  console.log('[smoke] 2/4 — build canonical memo (handover §5)');
-  const memo = buildMemo(cfg.operatorPartyId);
-  console.log(`[smoke]        memo: ${memo}`);
-
-  console.log('[smoke] 3/4 — run daml script to submit the TransferInstructionV2');
-  const { updateId, durationMs } = await runDamlScript(cfg, accessToken, memo);
-  console.log(`[smoke]        submit OK, updateId=${updateId} (${durationMs}ms)`);
+  const body = buildRequest(cfg);
+  console.log(
+    `[smoke] 2/3 — POST ${cfg.backendUrl}/api/dev/submit-swap-ti`,
+    JSON.stringify(body)
+  );
+  const response = await submitSwap(cfg, accessToken, body);
+  console.log(
+    `[smoke]        submit OK — requestId=${response.requestId}, ` +
+      `tiCid=${response.transferInstructionCid}, submittedAt=${response.submittedAt}`
+  );
+  // Reference so linter doesn't complain the random UUID helper is unused
+  // while this file is mid-flight; it's kept for future memo-payload work.
+  void randomUUID;
 
   if (cfg.skipLogTail) {
-    console.log('[smoke] 4/4 — SKIPPED backend log tail (--skip-log-tail)');
+    console.log('[smoke] 3/3 — SKIPPED backend log tail (--skip-log-tail)');
     console.log('[smoke] done (submit leg only)');
     return;
   }
 
-  console.log('[smoke] 4/4 — tail Helvetswap backend log for swap pipeline events');
-  const watched = await watchBackendLog();
-  if (!watched.polled) {
+  console.log(
+    '[smoke] 3/3 — tail Helvetswap backend log for DEV-SWAP / SwapPoller / SwapTiProcessor'
+  );
+  const watched = await watchBackendLog(response.requestId, 60_000);
+
+  if (!watched.submitted) {
     throw new Error(
-      '[smoke] FAIL — SwapPoller never picked up the TI. ' +
-        'Check receiver party matches OPERATOR_PARTY_ID and memo shape is canonical. ' +
-        'Handover §6 row 1.'
+      '[smoke] FAIL — DEV-SWAP marker never logged. ' +
+        'Endpoint may have accepted the request but not fired its submission handler. ' +
+        'Ping Toiki with this requestId: ' +
+        response.requestId
     );
   }
   if (watched.errored) {
     throw new Error(
-      `[smoke] FAIL — SwapPoller or SwapTiProcessor errored. Last error line: ${watched.lastErrorLine}`
+      `[smoke] FAIL — backend errored. Last line: ${watched.lastErrorLine}`
+    );
+  }
+  if (!watched.polled) {
+    throw new Error(
+      '[smoke] FAIL — SwapPoller never picked up the TI despite DEV-SWAP marker. ' +
+        'Handover §6 row 1: check receiver party + memo shape.'
     );
   }
   if (!watched.completed) {
     throw new Error(
-      '[smoke] FAIL — SwapPoller picked up the TI but swap did not complete within the window.'
+      '[smoke] FAIL — SwapPoller picked up the TI but swap did not complete in the window.'
     );
   }
 
   console.log(
-    `[smoke] PASS — SwapPoller processed and completed requestId=${watched.lastRequestId ?? '?'}`
+    `[smoke] PASS — full pipeline fired: DEV-SWAP → SwapPoller → SwapTiProcessor — requestId=${response.requestId}`
   );
 }
 
