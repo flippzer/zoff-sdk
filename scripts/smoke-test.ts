@@ -40,11 +40,14 @@
  *
  * ## Prerequisites
  *
- * - Toiki's endpoint deployed on api.helvetswap.app. He'll confirm on
- *   Signal.
+ * - Toiki's endpoint deployed on devnet-api.helvetswap.app. He'll
+ *   confirm on Signal. (api.helvetswap.app is MainNet on a different
+ *   server + `prod` Spring profile — the dev endpoint does not exist
+ *   there.)
  * - `.env.local` populated: HELVETSWAP_POOL_ID (default
  *   `cc-cbtc-showcase`), HELVETSWAP_BACKEND_URL (default
- *   `https://api.helvetswap.app`). Nothing else is strictly needed.
+ *   `https://devnet-api.helvetswap.app`). Nothing else is strictly
+ *   needed.
  *
  * ## Run
  *
