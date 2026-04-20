@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-scripts/
+# The vendored interface ships with a pre-built dist — see VENDOR_NOTE.md
+!.vendor-provider-interface/dist/
+.env
+.env.local
+.env.*.local
+*.log
+.DS_Store
+.vscode/
+.idea/

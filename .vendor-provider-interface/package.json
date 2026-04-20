@@ -1,0 +1,54 @@
+{
+  "name": "@zoffwallet/provider-interface",
+  "version": "0.1.2",
+  "description": "Canonical TypeScript interface for Canton Network wallet providers. Zero runtime dependencies. Any wallet implements it; any dApp targets it.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/cjs/index.js",
+  "module": "./dist/esm/index.js",
+  "types": "./dist/esm/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/esm/index.d.ts",
+      "import": "./dist/esm/index.js",
+      "require": "./dist/cjs/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "clean": "rm -rf dist",
+    "build:esm": "tsc -p tsconfig.json",
+    "build:cjs": "tsc -p tsconfig.cjs.json && node -e \"require('fs').writeFileSync('dist/cjs/package.json', JSON.stringify({type:'commonjs'}))\"",
+    "build": "npm run clean && npm run build:esm && npm run build:cjs",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "canton",
+    "wallet",
+    "provider",
+    "interface",
+    "cip-0103"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/flippzer/canton-wallet-provider-interface.git"
+  },
+  "bugs": {
+    "url": "https://github.com/flippzer/canton-wallet-provider-interface/issues"
+  },
+  "homepage": "https://github.com/flippzer/canton-wallet-provider-interface#readme",
+  "publishConfig": {
+    "access": "public"
+  },
+  "sideEffects": false,
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.4.0"
+  }
+}
