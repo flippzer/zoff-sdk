@@ -49,7 +49,7 @@
   },
   "sideEffects": false,
   "dependencies": {
-    "@zoffwallet/provider-interface": "file:./.vendor-provider-interface"
+    "@zoffwallet/provider-interface": "^0.1.2"
   },
   "devDependencies": {
     "@types/node": "^20.12.0",

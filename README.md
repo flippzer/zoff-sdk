@@ -14,7 +14,7 @@ Phase 2 / in bring-up. Target: pass Helvetswap's DevNet end-to-end smoke test (`
 npm install @zoffwallet/sdk
 ```
 
-The interface package `@zoffwallet/provider-interface` is a dependency. It is not yet on npm — see [interface repo issue tracker](https://github.com/flippzer/canton-wallet-provider-interface/issues) for publish timing. Until then this package vendors the built `v0.1.2` under `.vendor-provider-interface/` and consumes it via a `file:` dep. That folder disappears the moment the interface lands on npm, at which point the dep becomes a plain `^0.1.2`.
+The interface package `@zoffwallet/provider-interface` is a dependency, published on npm (see [the package page](https://www.npmjs.com/package/@zoffwallet/provider-interface)).
 
 ## Usage
 
