@@ -1,6 +1,6 @@
 {
   "name": "@zoffwallet/sdk",
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "description": "Reference implementation of @zoffwallet/provider-interface. Browser SDK that translates the canonical CantonWalletProvider contract into HTTP calls against the Zoff wallet backend, with cross-origin popup approval.",
   "license": "MIT",
   "type": "module",

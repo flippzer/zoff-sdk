@@ -2,7 +2,18 @@
 
 All notable changes to `@zoffwallet/sdk` are documented here.
 
-## [Unreleased] — v0.1.0-rc.1 (target 2026-05-05)
+## [0.1.0-rc.1] — 2026-04-26
+
+Released ahead of the 2026-05-05 target. Published to npm under the `next` tag; GA `0.1.0` follows on 2026-05-08 once devnet smoke + Helvetswap-shape smoke pass.
+
+### Verification + polish (this release)
+
+- Vitest test suites for `HttpClient` `WalletError` mapping (every status code + fetch rejection), `CantonWalletProvider` interface conformance, network-bind, popup origin allowlist, and `onTransactionUpdate` listener registry. 40/40 tests passing.
+- `examples/devnet-end-to-end.ts` — full discovery → init → connect → getHoldings → prepareTransfer → submitAndWaitForTransaction smoke runnable in any browser dApp shell.
+- README backend → canonical `WalletError` mapping table mirroring `src/transport/http.ts` exactly.
+- `tsconfig.json` `sourceMap` + `declarationMap` → false. Published tarball: 23 files / 20.1 kB (was 41 / 28.7 kB), zero `.map` entries.
+
+
 
 ### Architecture pivot from 2026-04-20 scaffold
 
