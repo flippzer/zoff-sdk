@@ -1,48 +1,60 @@
 /**
- * Construction-time config for a {@link ZoffProvider}.
+ * Construction-time + network-derived config for {@link ZoffProvider}.
  *
- * Kept separate from `InitConfig` (the dApp-facing init payload from the
- * provider interface). `ZoffProviderConfig` is wallet-implementation
- * plumbing: Keycloak endpoint, ledger-API host/port, the party this
- * provider speaks for. `InitConfig` is the dApp saying "I'm this dApp,
- * targeting this network" — no auth material.
+ * `ZoffProviderOptions` is the dApp-side construction surface. All fields
+ * are optional: a no-arg construction picks defaults derived from
+ * `init({network})` at init time. The only reason to pass options is for
+ * local development (override the wallet origin to point at a dev wallet
+ * server) or for tests (point both origins at a fixture server).
+ *
+ * Production dApps SHOULD NOT pass these. Setting either bypasses the
+ * canonical network-to-origin map.
  */
+import type { SupportedNetwork } from '@zoffwallet/provider-interface';
 
-export interface LedgerApiConfig {
-  readonly host: string;
-  readonly port: number;
-  readonly tls: boolean;
-}
+/** Networks `@zoffwallet/sdk` v0.1.x can be initialized against. */
+export const SUPPORTED_NETWORKS: readonly SupportedNetwork[] = ['devnet'];
 
-export interface KeycloakPasswordGrantConfig {
-  readonly tokenUrl: string;
-  readonly clientId: string;
-  readonly username: string;
-  readonly password: string;
-  /**
-   * Scope requested from Keycloak. Defaults to `'openid'` per the DevNet
-   * handover. Callers override only if their realm requires a different
-   * scope (e.g. `'openid profile'`).
-   */
-  readonly scope?: string;
-}
+/**
+ * Wallet origin per network — the cross-origin target for approval
+ * popups (`/wallet/sdk/connect`, `/wallet/sdk/sign`).
+ *
+ * `undefined` means "not supported in this build". `init({network: ...})`
+ * with such a network throws `WalletError { code: 'INVALID_COMMAND' }`.
+ */
+export const NETWORK_TO_WALLET_ORIGIN: Readonly<
+  Record<SupportedNetwork, string | undefined>
+> = {
+  devnet: 'https://devnet.zoff.app',
+  mainnet: undefined,
+  testnet: undefined,
+};
 
-export interface ZoffProviderConfig {
-  readonly ledgerApi: LedgerApiConfig;
-  readonly auth: KeycloakPasswordGrantConfig;
+/**
+ * Backend origin per network — the REST target for the canon-conformant
+ * `/sdk/*` routes (`build-transfer-commands`, `holdings/:partyId`,
+ * `active-contracts`) plus the existing `/auth/*` and `/tx/*` endpoints.
+ *
+ * Same `undefined` semantics as {@link NETWORK_TO_WALLET_ORIGIN}.
+ */
+export const NETWORK_TO_BACKEND_ORIGIN: Readonly<
+  Record<SupportedNetwork, string | undefined>
+> = {
+  devnet: 'https://api.devnet.zoff.app',
+  mainnet: undefined,
+  testnet: undefined,
+};
+
+export interface ZoffProviderOptions {
   /**
-   * Party id this provider acts for. Required — we do not derive it from
-   * the JWT. Party IDs on Canton encode the participant fingerprint, so
-   * only the deployer knows which party a given Keycloak user should
-   * represent.
+   * Override the wallet origin used for popup approval. Defaults to
+   * {@link NETWORK_TO_WALLET_ORIGIN}`[network]` resolved at init time.
    */
-  readonly partyId: string;
+  readonly walletOrigin?: string;
+
   /**
-   * Synchronizer id the provider submits to. Optional: when omitted,
-   * implementations SHOULD resolve at runtime via the participant's
-   * connected-synchronizer list. The gRPC client (Phase 3) will do that
-   * resolution; pre-gRPC the field is currently required upstream of any
-   * submit.
+   * Override the backend origin used for REST. Defaults to
+   * {@link NETWORK_TO_BACKEND_ORIGIN}`[network]` resolved at init time.
    */
-  readonly synchronizerId?: string;
+  readonly backendOrigin?: string;
 }

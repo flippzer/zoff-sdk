@@ -1,71 +1,81 @@
 # @zoffwallet/sdk
 
-Reference implementation of [`@zoffwallet/provider-interface`](https://github.com/flippzer/canton-wallet-provider-interface) for Canton Network.
-
-A `ZoffProvider` that speaks the canonical `CantonWalletProvider` contract end-to-end — intended to prove the interface is implementable in practice, and to be the first published consumer against `@zoffwallet/provider-interface`.
+Reference implementation of [`@zoffwallet/provider-interface`](https://github.com/flippzer/canton-wallet-provider-interface) for Canton Network — a browser SDK that any dApp can install from npm and target the canonical `CantonWalletProvider` contract end-to-end against the Zoff wallet.
 
 ## Status
 
-Phase 2 / in bring-up. Target: pass Helvetswap's DevNet end-to-end smoke test (`scripts/smoke-test.ts`).
+Pre-release. v0.1.0-rc.1 publish target: 2026-05-05 EOD under npm `next` tag. v0.1.0 GA: 2026-05-08 under `latest`. See [`CHANGELOG.md`](./CHANGELOG.md).
 
 ## Install
 
 ```
-npm install @zoffwallet/sdk
+npm install @zoffwallet/sdk @zoffwallet/provider-interface
 ```
 
-The interface package `@zoffwallet/provider-interface` is a dependency, published on npm (see [the package page](https://www.npmjs.com/package/@zoffwallet/provider-interface)).
+`@zoffwallet/provider-interface` is a peer dependency: dApps install it directly so they can import the canonical types without coupling to a wallet implementation.
 
 ## Usage
 
 ```ts
 import { ZoffProvider } from '@zoffwallet/sdk';
 
-const zoff = new ZoffProvider({
-  ledgerApi: { host: 'localhost', port: 5001, tls: false },
-  auth: {
-    tokenUrl: 'http://localhost:8082/realms/AppProvider/protocol/openid-connect/token',
-    clientId: 'app-provider-unsafe',
-    username: 'alice',
-    password: '<from-signal>',
-  },
-  partyId: 'Alice-…::1220…',
-});
-
+const zoff = new ZoffProvider();
 await zoff.init({ appName: 'my-dapp', network: 'devnet' });
-await zoff.connect();
 
-const holdings = await zoff.getHoldings();
+const { partyId, authToken } = await zoff.connect();
 
 const prepared = await zoff.prepareTransfer({
-  recipient: 'ClearportX-DEX-1::1220…',
+  recipient: 'Recipient::1220...',
   amount: '1.0',
-  instrument: { instrumentAdmin: 'DSO::1220…', instrumentId: 'Amulet' },
-  memo: JSON.stringify({ v: 1, requestId: crypto.randomUUID(), /* … */ }),
+  instrument: { instrumentAdmin: 'DSO::1220...', instrumentId: 'Amulet' },
 });
 
 const result = await zoff.submitAndWaitForTransaction(prepared);
+// result.updateId, result.completionOffset
 ```
 
-## DevNet smoke test
+## Discovery (EIP-6963 style)
 
-`scripts/smoke-test.ts` runs handover §4 end-to-end. Prerequisites:
+The SDK dispatches `canton:announceProvider` on `window` as `init()` resolves. dApps that want multi-wallet support listen for it:
 
-1. SSH tunnel open:
-   ```
-   ssh -N -T -i ~/.ssh/zoff_devnet_helvetswap \
-     -L 5001:localhost:5001 \
-     -L 8082:localhost:8082 \
-     root@5.9.70.48
-   ```
-2. `.env.local` populated from the Signal drop (password, synchronizer id).
+```ts
+import type { CantonWalletAnnounceEvent } from '@zoffwallet/provider-interface';
 
-Then:
+const providers = new Map<string, { info: CantonWalletInfo; provider: CantonWalletProvider }>();
 
+window.addEventListener('canton:announceProvider', (e) => {
+  const { info, provider } = (e as CantonWalletAnnounceEvent).detail;
+  providers.set(info.uuid, { info, provider });
+});
+
+window.dispatchEvent(new Event('canton:requestProvider'));
 ```
-npm install
-npm run smoke
-```
+
+The SDK also listens for `canton:requestProvider` and re-announces, so late-registered listeners still receive the provider.
+
+## Networks
+
+| Network    | v0.1.x | Wallet origin                | Backend origin                    |
+|------------|--------|------------------------------|-----------------------------------|
+| `devnet`   | ✅     | `https://devnet.zoff.app`    | `https://api.devnet.zoff.app`     |
+| `mainnet`  | —      | not supported                | not supported                     |
+| `testnet`  | —      | not supported                | not supported                     |
+
+`init({network: 'mainnet' | 'testnet'})` throws `WalletError { code: 'INVALID_COMMAND' }`. Mainnet support follows the FeaturedAppRight grant; tracked separately.
+
+## Errors
+
+Every error a `ZoffProvider` method throws is a `WalletError` from the canonical interface — discriminate on `error.code`, never on `error.message`. The seven canonical codes:
+
+| Code               | Meaning                                                                         |
+|--------------------|---------------------------------------------------------------------------------|
+| `USER_REJECTED`    | User declined in the wallet UI.                                                 |
+| `RATE_LIMITED`     | Backend rate-limited; check `details.retryAfterMs` when present.                |
+| `NOT_CONNECTED`    | Method called before `connect()` or after `disconnect()`.                       |
+| `TIMEOUT`          | Operation exceeded its window.                                                  |
+| `VALIDATOR_ERROR`  | Backend or ledger-API failure.                                                  |
+| `INVALID_COMMAND`  | Malformed payload — unknown network, missing required field, etc.               |
+| `UNKNOWN`          | Unclassified failure.                                                           |
 
 ## License
 

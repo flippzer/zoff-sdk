@@ -1,8 +1,10 @@
 export { ZoffProvider } from './provider.js';
-export { JwtMinter } from './auth.js';
 export { ZoffWalletError, walletError } from './errors.js';
-export type {
-  ZoffProviderConfig,
-  LedgerApiConfig,
-  KeycloakPasswordGrantConfig,
+export {
+  NETWORK_TO_BACKEND_ORIGIN,
+  NETWORK_TO_WALLET_ORIGIN,
+  SUPPORTED_NETWORKS,
 } from './config.js';
+export type { ZoffProviderOptions } from './config.js';
+export { HttpClient } from './transport/http.js';
+export type { HttpClientConfig } from './transport/http.js';
