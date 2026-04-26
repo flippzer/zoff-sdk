@@ -2,6 +2,19 @@
 
 All notable changes to `@zoffwallet/sdk` are documented here.
 
+## [0.1.0-rc.2] — 2026-04-26
+
+Adds `ZoffProvider.withTestingTransport({ autoApprove: true })` for headless CI smoke tests against the popup-approval flows.
+
+### Added
+
+- `ZoffProvider.withTestingTransport(config, options?)` — static factory that returns a `ZoffProvider` whose popup transport is stubbed by an in-memory auto-approve fake. `connect()`, `submitTransaction()`, `submitAndWaitForTransaction()`, and `signMessage()` resolve deterministically without opening a real popup or unlocking a keystore. Pairs cleanly with a fixture `CantonWalletProvider` impl on the dApp side: fixture-provider validates wiring shape, testing-transport validates wallet transport. The HTTPS routes (`/sdk/holdings`, `/sdk/build-transfer-commands`, `/sdk/active-contracts`) are NOT mocked — mock those at the `fetch` level for full isolation. Empty-`commands` validation still throws `INVALID_COMMAND` (canonical-contract assertions are not bypassed). 9 vitest cases cover all three popup types + custom-fixture overrides + the full canonical flow against a mocked fetch.
+- `TestingTransportConfig` exported from the package root for typing test harnesses.
+
+### Safety
+
+The factory deliberately has a name that's easy to grep for in a publish checklist. Importing `src/transport/testing.ts` on a production code path silently bypasses user consent — name-grep for `withTestingTransport` in your bundle if you're paranoid.
+
 ## [0.1.0-rc.1] — 2026-04-26
 
 Released ahead of the 2026-05-05 target. Published to npm under the `next` tag; GA `0.1.0` follows on 2026-05-08 once devnet smoke + Helvetswap-shape smoke pass.

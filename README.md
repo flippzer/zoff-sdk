@@ -96,6 +96,34 @@ Network failures (fetch rejection) map to `VALIDATOR_ERROR` with `details.cause:
 
 See [`examples/devnet-end-to-end.ts`](./examples/devnet-end-to-end.ts) for a self-contained EIP-6963 discovery → init → connect → getHoldings → prepareTransfer → submitAndWaitForTransaction smoke against devnet.
 
+## CI / headless testing
+
+For CI smokes that exercise the SDK end-to-end without a real popup or a human, use `ZoffProvider.withTestingTransport`:
+
+```ts
+import { ZoffProvider } from '@zoffwallet/sdk';
+
+const provider = ZoffProvider.withTestingTransport({
+  autoApprove: true,
+  // Optional — every fixture has a deterministic default
+  party: { partyId: 'TestParty::1220...test', authToken: 'test-jwt' },
+  submit: { transactionId: 'test-tx-id', completionOffset: 1 },
+});
+
+await provider.init({ appName: 'ci-smoke', network: 'devnet' });
+await provider.connect();                                     // resolves instantly with the fixture party
+const result = await provider.submitAndWaitForTransaction({   // resolves with fixture transactionId
+  commands: [...],
+  actAs: provider.partyId!,
+});
+```
+
+The HTTPS-direct routes (`prepareTransfer`, `getHoldings`, `getActiveContracts`) are NOT mocked — they still hit `backendOrigin`. Mock those at the `fetch` level for full isolation, or point `backendOrigin` to a test backend.
+
+Empty-`commands` validation still throws `INVALID_COMMAND` — canonical-contract guarantees are not bypassed by the testing transport. Only the popup approval is faked.
+
+**Do not use in production code paths.** Any provider returned by `withTestingTransport` silently bypasses user consent. The name is deliberately easy to grep for in a publish checklist.
+
 ## License
 
 MIT

@@ -71,6 +71,10 @@ import {
   openSignMessagePopup,
   openSignPopup,
 } from './transport/popup.js';
+import {
+  createAutoApproveWindow,
+  type TestingTransportConfig,
+} from './transport/testing.js';
 
 const WALLET_NAME = 'Zoff';
 const WALLET_VERSION = '0.1.0';
@@ -103,8 +107,42 @@ export class ZoffProvider implements CantonWalletProvider {
   private readonly transactionListeners = new Set<
     (update: TransactionUpdate) => void
   >();
+  private testingTransport: TestingTransportConfig | null = null;
+  private testWindow: Window | null = null;
 
   constructor(private readonly options: ZoffProviderOptions = {}) {}
+
+  /**
+   * Construct a `ZoffProvider` whose popup-approval transport is
+   * stubbed by an in-memory auto-approve fake. Every `connect()`,
+   * `submitTransaction()`, `submitAndWaitForTransaction()`, and
+   * `signMessage()` call resolves deterministically without opening a
+   * real popup or prompting the user.
+   *
+   * Intended for CI smoke tests that exercise the SDK end-to-end —
+   * popup transport, cross-origin handshake, listener registry, error
+   * surface — without a human in the loop. Pairs with a fixture
+   * `CantonWalletProvider` impl on the dApp side: the fixture-provider
+   * smoke validates wiring shape, this validates wallet transport.
+   *
+   * The HTTPS routes (`/sdk/holdings`, `/sdk/build-transfer-commands`,
+   * `/sdk/active-contracts`) are NOT mocked — they still hit whatever
+   * `backendOrigin` resolves to. Mock those at the `fetch` level if you
+   * want full isolation.
+   *
+   * SAFETY: any `ZoffProvider` returned by this method silently bypasses
+   * user consent. Do NOT use in production code paths. The factory
+   * deliberately has a name that's easy to grep for in a publish
+   * checklist.
+   */
+  static withTestingTransport(
+    config: TestingTransportConfig,
+    options?: ZoffProviderOptions
+  ): ZoffProvider {
+    const provider = new ZoffProvider(options);
+    provider.testingTransport = config;
+    return provider;
+  }
 
   // --- Identity --------------------------------------------------------
 
@@ -152,6 +190,14 @@ export class ZoffProvider implements CantonWalletProvider {
       authToken: () => this._authToken,
     });
 
+    if (this.testingTransport !== null) {
+      this.testWindow = createAutoApproveWindow(
+        this.testingTransport,
+        walletOrigin,
+        config.network
+      );
+    }
+
     this.initialized = true;
 
     this.installAnnounceProvider();
@@ -193,6 +239,7 @@ export class ZoffProvider implements CantonWalletProvider {
       dappName: this._appName,
       requestedNetwork: this._network,
       requestId,
+      ...(this.testWindow !== null ? { windowImpl: this.testWindow } : {}),
     });
 
     // Network bind: the wallet MUST echo the network the SDK was
@@ -497,6 +544,7 @@ export class ZoffProvider implements CantonWalletProvider {
       dappOrigin,
       dappName: this._appName,
       requestId,
+      ...(this.testWindow !== null ? { windowImpl: this.testWindow } : {}),
       payload: {
         commands: opts.commands,
         actAs: opts.actAs,
@@ -563,6 +611,7 @@ export class ZoffProvider implements CantonWalletProvider {
       dappName: this._appName,
       requestId,
       message,
+      ...(this.testWindow !== null ? { windowImpl: this.testWindow } : {}),
     });
   }
 

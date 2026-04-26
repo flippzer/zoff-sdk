@@ -21,3 +21,4 @@ export type {
   PopupSignMessageResponse,
   PopupSignResponse,
 } from './transport/popup.js';
+export type { TestingTransportConfig } from './transport/testing.js';
