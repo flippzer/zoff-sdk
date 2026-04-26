@@ -31,7 +31,7 @@
  * | `prepareTransfer`               | shipped — HTTPS to `POST /sdk/build-transfer-commands` |
  * | `getHoldings`                   | shipped — HTTPS to `GET /sdk/holdings/:partyId` |
  * | `connect`                       | shipped — cross-origin popup at `/sdk/connect`, requires the wallet-side page (pending in canton-wallet) |
- * | `getActiveContracts`            | stub — `/sdk/active-contracts` pending (Day 2 follow-up) |
+ * | `getActiveContracts`            | shipped — HTTPS to `POST /sdk/active-contracts` |
  * | `submitTransaction`             | stub — popup + `/tx/*` pending (Day 3-4) |
  * | `submitAndWaitForTransaction`   | stub — popup + `/tx/*` pending (Day 3-4) |
  * | `onTransactionUpdate`           | stub — listener registry pending (Day 4) |
@@ -247,12 +247,47 @@ export class ZoffProvider implements CantonWalletProvider {
     );
   }
 
-  async getActiveContracts(_filter: {
+  /**
+   * Query the connected party's active contracts, filtered by interface
+   * id or template id. At least one filter MUST be provided — the
+   * canonical contract says "implementation-defined" when neither is
+   * passed; we choose `INVALID_COMMAND` to avoid full-ACS dumps.
+   *
+   * `interfaceId` takes precedence over `templateId` when both are
+   * provided — interface filters are semantically the more specific
+   * choice (a template-id query against an Interface implementer would
+   * miss alternative implementations of the same interface).
+   */
+  async getActiveContracts(filter: {
     readonly interfaceId?: string;
     readonly templateId?: string;
   }): Promise<readonly Contract[]> {
     this.assertConnected();
-    throw walletError('UNKNOWN', STUB_MESSAGE, { method: 'getActiveContracts' });
+    if (this.httpClient === null || this._partyId === null) {
+      throw walletError(
+        'NOT_CONNECTED',
+        'HTTP client or partyId not initialized'
+      );
+    }
+    if (
+      (filter.interfaceId === undefined || filter.interfaceId === '') &&
+      (filter.templateId === undefined || filter.templateId === '')
+    ) {
+      throw walletError(
+        'INVALID_COMMAND',
+        'getActiveContracts requires either interfaceId or templateId'
+      );
+    }
+
+    return this.httpClient.post<readonly Contract[]>('/sdk/active-contracts', {
+      partyId: this._partyId,
+      ...(filter.interfaceId !== undefined && filter.interfaceId !== ''
+        ? { interfaceId: filter.interfaceId }
+        : {}),
+      ...(filter.templateId !== undefined && filter.templateId !== ''
+        ? { templateId: filter.templateId }
+        : {}),
+    });
   }
 
   // --- Transfer preparation -------------------------------------------

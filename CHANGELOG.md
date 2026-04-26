@@ -20,6 +20,7 @@ The class shape (`ZoffProvider implements CantonWalletProvider`), error helpers 
 - `submitAndWaitForTransaction(opts)` — opens the wallet's `/sdk/sign` approval popup with the canonical `SubmitOptions`, awaits the popup's `/tx/prepare` + signature + `/tx/execute` round-trip, returns canonical `SubmitResult { updateId, completionOffset }`. v0.1.0 backend semantics: `/tx/execute` only returns once the participant has prepared + executed, which is effectively committed-on-synchronizer for our purposes — a future version may swap for an explicit poll-for-offset endpoint.
 - `submitTransaction(opts)` — same popup flow as `submitAndWait`; returns `{submissionId}` immediately and emits a synthetic `COMMITTED` `TransactionUpdate` to all `onTransactionUpdate` listeners via `queueMicrotask`. v0.2.0 will distinguish validator-accepted vs committed via a real async update channel.
 - `onTransactionUpdate(callback)` — in-memory listener registry. Returns an unsubscribe function. Multiple listeners supported; listener errors are isolated.
+- `getActiveContracts({interfaceId?, templateId?})` — HTTPS to `POST /sdk/active-contracts`. Backend proxies Canton's `/v2/state/active-contracts` filtered by either interface or template id. At least one filter must be provided (avoids accidental full-ACS dumps); `interfaceId` takes precedence over `templateId` when both are present.
 - The bidirectional sign-popup handshake: popup posts `zoff:sdk:sign:ready` to opener once mounted; opener pushes `zoff:sdk:sign:request` carrying the canonical `commands / actAs / readAs / disclosedContracts`; popup posts `zoff:sdk:sign:response` once `/tx/execute` resolves. The `commands` array can be arbitrarily large; URL params would be the wrong fit, hence the inbound postMessage.
 - `HttpClient` transport layer (`src/transport/http.ts`) — Bearer-auth wrapper with status-first canonical `WalletError` mapping (401→`NOT_CONNECTED`, 429→`RATE_LIMITED`, 408/504→`TIMEOUT`, 400→`INVALID_COMMAND`, 5xx→`VALIDATOR_ERROR`). Fetch override supported for tests.
 - `openConnectPopup` + `openSignPopup` cross-origin popup helpers (`src/transport/popup.ts`) — exported for advanced consumers; `ZoffProvider.connect`, `submitAndWaitForTransaction`, `submitTransaction` use them internally.
@@ -27,7 +28,6 @@ The class shape (`ZoffProvider implements CantonWalletProvider`), error helpers 
 
 ### Pending
 
-- `getActiveContracts({interfaceId?, templateId?})` — needs new backend route `POST /sdk/active-contracts`.
 - `signMessage(message)` — popup approval, signs an arbitrary message with the keystore-unlocked Ed25519 key.
 
 Stubbed methods throw `WalletError { code: 'UNKNOWN', details: { method } }` with a message pointing at this plan; they do not violate the canonical contract surface.
