@@ -17,7 +17,7 @@ export const SUPPORTED_NETWORKS: readonly SupportedNetwork[] = ['devnet'];
 
 /**
  * Wallet origin per network — the cross-origin target for approval
- * popups (`/wallet/sdk/connect`, `/wallet/sdk/sign`).
+ * popups (`/sdk/connect`, `/sdk/sign`).
  *
  * `undefined` means "not supported in this build". `init({network: ...})`
  * with such a network throws `WalletError { code: 'INVALID_COMMAND' }`.

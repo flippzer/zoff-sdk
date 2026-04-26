@@ -2,7 +2,7 @@
  * Cross-origin popup transport for `@zoffwallet/sdk`.
  *
  * The dApp lives at e.g. `https://helvetswap.app`. The Zoff wallet's
- * approval pages live at `https://devnet.zoff.app/wallet/sdk/{connect,sign}`.
+ * approval pages live at `https://devnet.zoff.app/sdk/{connect,sign}`.
  * Cross-origin postMessage is the only safe channel between them.
  *
  * Hard rules enforced by every helper here:
@@ -75,7 +75,7 @@ export interface PopupConnectResponse {
 }
 
 /**
- * Open the wallet's `/wallet/sdk/connect` approval popup, await a
+ * Open the wallet's `/sdk/connect` approval popup, await a
  * `zoff:sdk:connect:response` postMessage from `walletOrigin`, and
  * resolve with the connection result. See module docstring for the
  * cross-origin handling rules.
@@ -114,7 +114,7 @@ function buildConnectUrl(params: OpenConnectPopupParams): string {
   if (params.dappIcon !== undefined) {
     search.set('dappIcon', params.dappIcon);
   }
-  return `${params.walletOrigin}/wallet/sdk/connect?${search.toString()}`;
+  return `${params.walletOrigin}/sdk/connect?${search.toString()}`;
 }
 
 function openCenteredPopup(

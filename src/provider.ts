@@ -15,7 +15,7 @@
  *      │       /sdk/active-contracts        · /tx/{prepare,execute}
  *      │       /auth/{challenge,verify}
  *      │
- *      └──▶ popup ─────▶ devnet.zoff.app/wallet/sdk/{connect,sign}
+ *      └──▶ popup ─────▶ devnet.zoff.app/sdk/{connect,sign}
  *              auth handshake · prepared-tx approval · signature
  *
  * The provider is browser-only. Cross-origin postMessage is locked to
@@ -30,7 +30,7 @@
  * | `disconnect` `isConnected` `partyId` `getAccount` | shipped |
  * | `prepareTransfer`               | shipped — HTTPS to `POST /sdk/build-transfer-commands` |
  * | `getHoldings`                   | shipped — HTTPS to `GET /sdk/holdings/:partyId` |
- * | `connect`                       | shipped — cross-origin popup at `/wallet/sdk/connect`, requires the wallet-side page (pending in canton-wallet) |
+ * | `connect`                       | shipped — cross-origin popup at `/sdk/connect`, requires the wallet-side page (pending in canton-wallet) |
  * | `getActiveContracts`            | stub — `/sdk/active-contracts` pending (Day 2 follow-up) |
  * | `submitTransaction`             | stub — popup + `/tx/*` pending (Day 3-4) |
  * | `submitAndWaitForTransaction`   | stub — popup + `/tx/*` pending (Day 3-4) |
