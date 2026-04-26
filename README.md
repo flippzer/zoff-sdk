@@ -77,6 +77,25 @@ Every error a `ZoffProvider` method throws is a `WalletError` from the canonical
 | `INVALID_COMMAND`  | Malformed payload — unknown network, missing required field, etc.               |
 | `UNKNOWN`          | Unclassified failure.                                                           |
 
+### Backend → canonical mapping
+
+`@zoffwallet/sdk` calls the canton-wallet backend via HTTPS. The mapping from HTTP status to canonical `code` is, in order:
+
+| HTTP status                                | `code`             |
+|--------------------------------------------|--------------------|
+| `401`                                      | `NOT_CONNECTED`    |
+| `429`                                      | `RATE_LIMITED`     |
+| `408`, `504`                               | `TIMEOUT`          |
+| `400` (or backend `code: INVALID_ARGUMENT`)| `INVALID_COMMAND`  |
+| `5xx`                                      | `VALIDATOR_ERROR`  |
+| anything else                              | `UNKNOWN`          |
+
+Network failures (fetch rejection) map to `VALIDATOR_ERROR` with `details.cause: 'fetch_failed'`. The original HTTP status and any backend code are preserved on `details.backendStatus` / `details.backendCode` for tooling — but per the canonical contract callers MUST discriminate on `code`.
+
+## Example
+
+See [`examples/devnet-end-to-end.ts`](./examples/devnet-end-to-end.ts) for a self-contained EIP-6963 discovery → init → connect → getHoldings → prepareTransfer → submitAndWaitForTransaction smoke against devnet.
+
 ## License
 
 MIT
