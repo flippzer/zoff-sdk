@@ -30,10 +30,10 @@
  * | `disconnect` `isConnected` `partyId` `getAccount` | shipped |
  * | `prepareTransfer`               | shipped — HTTPS to `POST /sdk/build-transfer-commands` |
  * | `getHoldings`                   | shipped — HTTPS to `GET /sdk/holdings/:partyId` |
- * | `connect`                       | stub — popup transport pending (Day 3) |
+ * | `connect`                       | shipped — cross-origin popup at `/wallet/sdk/connect`, requires the wallet-side page (pending in canton-wallet) |
  * | `getActiveContracts`            | stub — `/sdk/active-contracts` pending (Day 2 follow-up) |
- * | `submitTransaction`             | stub — popup + `/tx/*` pending (Day 3) |
- * | `submitAndWaitForTransaction`   | stub — popup + `/tx/*` pending (Day 3) |
+ * | `submitTransaction`             | stub — popup + `/tx/*` pending (Day 3-4) |
+ * | `submitAndWaitForTransaction`   | stub — popup + `/tx/*` pending (Day 3-4) |
  * | `onTransactionUpdate`           | stub — listener registry pending (Day 4) |
  * | `signMessage`                   | stub — popup pending (Day 4) |
  *
@@ -66,6 +66,7 @@ import {
 import type { ZoffProviderOptions } from './config.js';
 import { walletError } from './errors.js';
 import { HttpClient } from './transport/http.js';
+import { openConnectPopup } from './transport/popup.js';
 
 const WALLET_NAME = 'Zoff';
 const WALLET_VERSION = '0.1.0';
@@ -151,7 +152,65 @@ export class ZoffProvider implements CantonWalletProvider {
 
   async connect(): Promise<ConnectResult> {
     this.assertInitialized();
-    throw walletError('UNKNOWN', STUB_MESSAGE, { method: 'connect' });
+
+    // assertInitialized guarantees these are non-null, but TypeScript can't
+    // narrow class-field types across a method call. Belt-and-braces.
+    if (
+      this._walletOrigin === null ||
+      this._network === null ||
+      this._appName === null
+    ) {
+      throw walletError(
+        'INVALID_COMMAND',
+        'Provider state inconsistent — call init() first.'
+      );
+    }
+
+    const dappOrigin =
+      typeof window !== 'undefined' ? window.location.origin : '';
+    if (dappOrigin === '') {
+      throw walletError(
+        'INVALID_COMMAND',
+        'connect() requires a browser environment with window.location.origin'
+      );
+    }
+
+    const requestId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    const response = await openConnectPopup({
+      walletOrigin: this._walletOrigin,
+      dappOrigin,
+      dappName: this._appName,
+      requestedNetwork: this._network,
+      requestId,
+    });
+
+    // Network bind: the wallet MUST echo the network the SDK was
+    // initialized with. Any mismatch is `INVALID_COMMAND` per the
+    // canonical contract — the SDK and wallet are out of sync and we
+    // refuse to mint a session against the wrong chain.
+    if (response.network !== this._network) {
+      throw walletError(
+        'INVALID_COMMAND',
+        `Wallet returned network '${response.network}' but provider was initialized with '${this._network}'.`,
+        {
+          requestedNetwork: this._network,
+          walletNetwork: response.network,
+        }
+      );
+    }
+
+    this._partyId = response.partyId;
+    this._authToken = response.authToken;
+    this.connected = true;
+
+    return {
+      partyId: response.partyId,
+      authToken: response.authToken,
+    };
   }
 
   async disconnect(): Promise<void> {
