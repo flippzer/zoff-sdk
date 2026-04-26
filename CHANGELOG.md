@@ -27,11 +27,8 @@ The class shape (`ZoffProvider implements CantonWalletProvider`), error helpers 
 
 ### Pending
 
-- Wallet-side approval pages in canton-wallet — `app/(app)/sdk/connect/page.tsx` and `.../sign/page.tsx`. Until they land, `connect()` opens a popup that 404s; the SDK's transport layer is ready to handshake the moment the pages exist.
-- `getActiveContracts()` — needs new backend route `POST /sdk/active-contracts`.
-- `submitAndWaitForTransaction()`, `submitTransaction()` — popup approval at `https://devnet.zoff.app/sdk/sign`, then HTTPS against existing `/tx/prepare` + `/tx/execute`.
-- `onTransactionUpdate(callback)` — in-memory listener registry that emits `COMMITTED` after `/tx/execute` resolves and `FAILED` on errors.
-- `signMessage(message)` — popup approval, signs with the keystore-unlocked Ed25519 key.
+- `getActiveContracts({interfaceId?, templateId?})` — needs new backend route `POST /sdk/active-contracts`.
+- `signMessage(message)` — popup approval, signs an arbitrary message with the keystore-unlocked Ed25519 key.
 
 Stubbed methods throw `WalletError { code: 'UNKNOWN', details: { method } }` with a message pointing at this plan; they do not violate the canonical contract surface.
 
