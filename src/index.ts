@@ -8,10 +8,16 @@ export {
 export type { ZoffProviderOptions } from './config.js';
 export { HttpClient } from './transport/http.js';
 export type { HttpClientConfig } from './transport/http.js';
-export { openConnectPopup, openSignPopup } from './transport/popup.js';
+export {
+  openConnectPopup,
+  openSignMessagePopup,
+  openSignPopup,
+} from './transport/popup.js';
 export type {
   OpenConnectPopupParams,
+  OpenSignMessagePopupParams,
   OpenSignPopupParams,
   PopupConnectResponse,
+  PopupSignMessageResponse,
   PopupSignResponse,
 } from './transport/popup.js';

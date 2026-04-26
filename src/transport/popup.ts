@@ -38,6 +38,9 @@ const CONNECT_RESPONSE_TYPE = 'zoff:sdk:connect:response' as const;
 const SIGN_READY_TYPE = 'zoff:sdk:sign:ready' as const;
 const SIGN_REQUEST_TYPE = 'zoff:sdk:sign:request' as const;
 const SIGN_RESPONSE_TYPE = 'zoff:sdk:sign:response' as const;
+const SIGN_MESSAGE_READY_TYPE = 'zoff:sdk:sign-message:ready' as const;
+const SIGN_MESSAGE_REQUEST_TYPE = 'zoff:sdk:sign-message:request' as const;
+const SIGN_MESSAGE_RESPONSE_TYPE = 'zoff:sdk:sign-message:response' as const;
 
 export interface OpenConnectPopupParams {
   /**
@@ -230,6 +233,183 @@ function waitForConnectResponse(
           walletError(
             'TIMEOUT',
             `Wallet connect approval timed out after ${timeoutMs}ms`,
+            { timeoutMs }
+          )
+        );
+      });
+    }, timeoutMs);
+
+    const closedPollHandle = win.setInterval(() => {
+      if (popup.closed) {
+        settle(() =>
+          reject(
+            walletError(
+              'USER_REJECTED',
+              'Popup was closed before approval'
+            )
+          )
+        );
+      }
+    }, CLOSE_POLL_MS);
+
+    win.addEventListener('message', onMessage);
+  });
+}
+
+// --- Sign-message popup ------------------------------------------------
+
+export interface OpenSignMessagePopupParams {
+  readonly walletOrigin: string;
+  readonly dappOrigin: string;
+  readonly dappName: string;
+  readonly dappIcon?: string;
+  readonly requestId: string;
+  readonly message: string;
+  readonly width?: number;
+  readonly height?: number;
+  readonly timeoutMs?: number;
+  readonly windowImpl?: Window;
+}
+
+export interface PopupSignMessageResponse {
+  readonly signature: string;
+}
+
+/**
+ * Open `/sdk/sign-message`, push the message via the bidirectional
+ * handshake, await the popup's signature. Same strict origin handling
+ * as the other popup helpers.
+ */
+export async function openSignMessagePopup(
+  params: OpenSignMessagePopupParams
+): Promise<PopupSignMessageResponse> {
+  const win = params.windowImpl ?? window;
+
+  const url = buildSignMessageUrl(params);
+  const popup = openCenteredPopup(
+    win,
+    url,
+    'zoff-sdk-sign-message',
+    params.width ?? DEFAULT_WIDTH,
+    params.height ?? DEFAULT_HEIGHT
+  );
+  if (popup === null) {
+    throw walletError(
+      'USER_REJECTED',
+      'Popup was blocked by the browser. Allow popups for this site and try again.',
+      { walletOrigin: params.walletOrigin }
+    );
+  }
+
+  return await waitForSignMessageResponse(win, popup, params);
+}
+
+function buildSignMessageUrl(params: OpenSignMessagePopupParams): string {
+  const search = new URLSearchParams({
+    dappOrigin: params.dappOrigin,
+    dappName: params.dappName,
+    requestId: params.requestId,
+  });
+  if (params.dappIcon !== undefined) {
+    search.set('dappIcon', params.dappIcon);
+  }
+  return `${params.walletOrigin}/sdk/sign-message?${search.toString()}`;
+}
+
+interface RawSignMessageResponse {
+  readonly type?: string;
+  readonly approved?: boolean;
+  readonly signature?: string;
+  readonly error?: string;
+}
+
+function waitForSignMessageResponse(
+  win: Window,
+  popup: Window,
+  params: OpenSignMessagePopupParams
+): Promise<PopupSignMessageResponse> {
+  const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  return new Promise<PopupSignMessageResponse>((resolve, reject) => {
+    let settled = false;
+    let payloadSent = false;
+
+    const cleanup = (): void => {
+      win.removeEventListener('message', onMessage);
+      win.clearTimeout(timeoutHandle);
+      win.clearInterval(closedPollHandle);
+    };
+
+    const settle = (cb: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      cb();
+    };
+
+    const onMessage = (event: MessageEvent): void => {
+      if (event.origin !== params.walletOrigin) return;
+      const data = event.data as { type?: string } & RawSignMessageResponse;
+      if (typeof data !== 'object' || data === null) return;
+
+      if (data.type === SIGN_MESSAGE_READY_TYPE) {
+        if (payloadSent) return;
+        payloadSent = true;
+        try {
+          popup.postMessage(
+            {
+              type: SIGN_MESSAGE_REQUEST_TYPE,
+              payload: { message: params.message },
+            },
+            params.walletOrigin
+          );
+        } catch (err) {
+          settle(() =>
+            reject(
+              walletError(
+                'VALIDATOR_ERROR',
+                `Failed to deliver sign-message payload: ${err instanceof Error ? err.message : String(err)}`
+              )
+            )
+          );
+        }
+        return;
+      }
+
+      if (data.type === SIGN_MESSAGE_RESPONSE_TYPE) {
+        if (data.approved !== true) {
+          const reason = data.error ?? 'User rejected the sign-message request';
+          settle(() => reject(walletError('USER_REJECTED', reason)));
+          return;
+        }
+        if (typeof data.signature !== 'string') {
+          settle(() =>
+            reject(
+              walletError(
+                'VALIDATOR_ERROR',
+                'Wallet returned a malformed sign-message response',
+                { received: data }
+              )
+            )
+          );
+          return;
+        }
+        settle(() => resolve({ signature: data.signature as string }));
+        return;
+      }
+    };
+
+    const timeoutHandle = win.setTimeout(() => {
+      settle(() => {
+        try {
+          popup.close();
+        } catch {
+          // Best-effort.
+        }
+        reject(
+          walletError(
+            'TIMEOUT',
+            `Wallet sign-message approval timed out after ${timeoutMs}ms`,
             { timeoutMs }
           )
         );

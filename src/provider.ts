@@ -66,7 +66,11 @@ import {
 import type { ZoffProviderOptions } from './config.js';
 import { walletError } from './errors.js';
 import { HttpClient } from './transport/http.js';
-import { openConnectPopup, openSignPopup } from './transport/popup.js';
+import {
+  openConnectPopup,
+  openSignMessagePopup,
+  openSignPopup,
+} from './transport/popup.js';
 
 const WALLET_NAME = 'Zoff';
 const WALLET_VERSION = '0.1.0';
@@ -514,9 +518,52 @@ export class ZoffProvider implements CantonWalletProvider {
 
   // --- Optional methods (shipped per Toiki 2026-04-27 commitment) ------
 
-  async signMessage(_message: string): Promise<{ readonly signature: string }> {
+  /**
+   * Sign an arbitrary UTF-8 message with the connected party's Ed25519
+   * key, returning the hex-encoded signature. Opens the wallet's
+   * `/sdk/sign-message` approval popup; the popup unlocks the keystore
+   * locally with the user's password and signs in-page — no Canton
+   * round-trip.
+   *
+   * dApps verify the returned signature against the `publicKey`
+   * delivered by `connect()` (or queried via `getAccount()`).
+   */
+  async signMessage(
+    message: string
+  ): Promise<{ readonly signature: string }> {
     this.assertConnected();
-    throw walletError('UNKNOWN', STUB_MESSAGE, { method: 'signMessage' });
+    if (
+      this._walletOrigin === null ||
+      this._appName === null ||
+      this._partyId === null
+    ) {
+      throw walletError(
+        'NOT_CONNECTED',
+        'Provider state inconsistent — call connect() first.'
+      );
+    }
+
+    const dappOrigin =
+      typeof window !== 'undefined' ? window.location.origin : '';
+    if (dappOrigin === '') {
+      throw walletError(
+        'INVALID_COMMAND',
+        'signMessage requires a browser environment with window.location.origin'
+      );
+    }
+
+    const requestId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    return openSignMessagePopup({
+      walletOrigin: this._walletOrigin,
+      dappOrigin,
+      dappName: this._appName,
+      requestId,
+      message,
+    });
   }
 
   async getAccount(): Promise<AccountInfo> {
