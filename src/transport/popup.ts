@@ -35,6 +35,9 @@ const CLOSE_POLL_MS = 500;
 
 /** Canonical message types for the SDK ↔ wallet handshake. */
 const CONNECT_RESPONSE_TYPE = 'zoff:sdk:connect:response' as const;
+const SIGN_READY_TYPE = 'zoff:sdk:sign:ready' as const;
+const SIGN_REQUEST_TYPE = 'zoff:sdk:sign:request' as const;
+const SIGN_RESPONSE_TYPE = 'zoff:sdk:sign:response' as const;
 
 export interface OpenConnectPopupParams {
   /**
@@ -227,6 +230,205 @@ function waitForConnectResponse(
           walletError(
             'TIMEOUT',
             `Wallet connect approval timed out after ${timeoutMs}ms`,
+            { timeoutMs }
+          )
+        );
+      });
+    }, timeoutMs);
+
+    const closedPollHandle = win.setInterval(() => {
+      if (popup.closed) {
+        settle(() =>
+          reject(
+            walletError(
+              'USER_REJECTED',
+              'Popup was closed before approval'
+            )
+          )
+        );
+      }
+    }, CLOSE_POLL_MS);
+
+    win.addEventListener('message', onMessage);
+  });
+}
+
+// --- Sign popup --------------------------------------------------------
+
+export interface OpenSignPopupParams {
+  readonly walletOrigin: string;
+  readonly dappOrigin: string;
+  readonly dappName: string;
+  readonly dappIcon?: string;
+  readonly requestId: string;
+  readonly width?: number;
+  readonly height?: number;
+  readonly timeoutMs?: number;
+  readonly windowImpl?: Window;
+  /** Forwarded to the popup once it signals ready; mirrors the canonical SubmitOptions sub-shape `/tx/prepare` accepts. */
+  readonly payload: {
+    readonly commands: ReadonlyArray<Record<string, unknown>>;
+    readonly actAs: string | ReadonlyArray<string>;
+    readonly readAs?: string | ReadonlyArray<string>;
+    readonly disclosedContracts?: ReadonlyArray<Record<string, unknown>>;
+  };
+}
+
+export interface PopupSignResponse {
+  readonly transactionId: string;
+  readonly completionOffset?: number;
+}
+
+/**
+ * Open `/sdk/sign`, perform the bidirectional handshake (popup → opener
+ * `ready` → opener → popup `request` → popup → opener `response`), and
+ * resolve with the executed transaction's id + completion offset.
+ *
+ * Same strict origin rules as {@link openConnectPopup}: outbound posts
+ * use `walletOrigin`; inbound messages are accepted only when
+ * `event.origin === walletOrigin`.
+ */
+export async function openSignPopup(
+  params: OpenSignPopupParams
+): Promise<PopupSignResponse> {
+  const win = params.windowImpl ?? window;
+
+  const url = buildSignUrl(params);
+  const popup = openCenteredPopup(
+    win,
+    url,
+    'zoff-sdk-sign',
+    params.width ?? DEFAULT_WIDTH,
+    params.height ?? DEFAULT_HEIGHT + 80
+  );
+  if (popup === null) {
+    throw walletError(
+      'USER_REJECTED',
+      'Popup was blocked by the browser. Allow popups for this site and try again.',
+      { walletOrigin: params.walletOrigin }
+    );
+  }
+
+  return await waitForSignResponse(win, popup, params);
+}
+
+function buildSignUrl(params: OpenSignPopupParams): string {
+  const search = new URLSearchParams({
+    dappOrigin: params.dappOrigin,
+    dappName: params.dappName,
+    requestId: params.requestId,
+  });
+  if (params.dappIcon !== undefined) {
+    search.set('dappIcon', params.dappIcon);
+  }
+  return `${params.walletOrigin}/sdk/sign?${search.toString()}`;
+}
+
+interface RawSignResponse {
+  readonly type?: string;
+  readonly approved?: boolean;
+  readonly transactionId?: string;
+  readonly completionOffset?: number;
+  readonly error?: string;
+}
+
+function waitForSignResponse(
+  win: Window,
+  popup: Window,
+  params: OpenSignPopupParams
+): Promise<PopupSignResponse> {
+  const timeoutMs = params.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  return new Promise<PopupSignResponse>((resolve, reject) => {
+    let settled = false;
+    let payloadSent = false;
+
+    const cleanup = (): void => {
+      win.removeEventListener('message', onMessage);
+      win.clearTimeout(timeoutHandle);
+      win.clearInterval(closedPollHandle);
+    };
+
+    const settle = (cb: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      cb();
+    };
+
+    const onMessage = (event: MessageEvent): void => {
+      if (event.origin !== params.walletOrigin) return;
+      const data = event.data as { type?: string } & RawSignResponse;
+      if (typeof data !== 'object' || data === null) return;
+
+      // Half 1: the popup mounted and signaled ready. Push the payload.
+      if (data.type === SIGN_READY_TYPE) {
+        if (payloadSent) return;
+        payloadSent = true;
+        try {
+          popup.postMessage(
+            {
+              type: SIGN_REQUEST_TYPE,
+              payload: params.payload,
+            },
+            params.walletOrigin
+          );
+        } catch (err) {
+          settle(() =>
+            reject(
+              walletError(
+                'VALIDATOR_ERROR',
+                `Failed to deliver sign payload to popup: ${err instanceof Error ? err.message : String(err)}`
+              )
+            )
+          );
+        }
+        return;
+      }
+
+      // Half 2: the popup completed the auth + prepare/sign/execute and
+      // posts back. This is the terminal message.
+      if (data.type === SIGN_RESPONSE_TYPE) {
+        if (data.approved !== true) {
+          const reason = data.error ?? 'User rejected the transaction';
+          settle(() => reject(walletError('USER_REJECTED', reason)));
+          return;
+        }
+        if (typeof data.transactionId !== 'string') {
+          settle(() =>
+            reject(
+              walletError(
+                'VALIDATOR_ERROR',
+                'Wallet returned a malformed sign response',
+                { received: data }
+              )
+            )
+          );
+          return;
+        }
+        const result: PopupSignResponse =
+          typeof data.completionOffset === 'number'
+            ? {
+                transactionId: data.transactionId,
+                completionOffset: data.completionOffset,
+              }
+            : { transactionId: data.transactionId };
+        settle(() => resolve(result));
+        return;
+      }
+    };
+
+    const timeoutHandle = win.setTimeout(() => {
+      settle(() => {
+        try {
+          popup.close();
+        } catch {
+          // Best-effort.
+        }
+        reject(
+          walletError(
+            'TIMEOUT',
+            `Wallet sign approval timed out after ${timeoutMs}ms`,
             { timeoutMs }
           )
         );

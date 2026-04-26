@@ -66,7 +66,7 @@ import {
 import type { ZoffProviderOptions } from './config.js';
 import { walletError } from './errors.js';
 import { HttpClient } from './transport/http.js';
-import { openConnectPopup } from './transport/popup.js';
+import { openConnectPopup, openSignPopup } from './transport/popup.js';
 
 const WALLET_NAME = 'Zoff';
 const WALLET_VERSION = '0.1.0';
@@ -96,6 +96,9 @@ export class ZoffProvider implements CantonWalletProvider {
   private _backendOrigin: string | null = null;
   private _requestProviderListener: (() => void) | null = null;
   private httpClient: HttpClient | null = null;
+  private readonly transactionListeners = new Set<
+    (update: TransactionUpdate) => void
+  >();
 
   constructor(private readonly options: ZoffProviderOptions = {}) {}
 
@@ -310,6 +313,24 @@ export class ZoffProvider implements CantonWalletProvider {
 
   // --- Submission ------------------------------------------------------
 
+  /**
+   * Submit a set of commands and resolve only after the resulting
+   * transaction has been observed on the ledger. Opens the wallet's
+   * `/sdk/sign` approval popup; the popup runs the auth handshake,
+   * calls `/tx/prepare` + `/tx/execute`, signs locally, and posts back
+   * `{transactionId, completionOffset}`.
+   *
+   * v0.1.0 semantics: in our backend `/tx/execute` only returns once the
+   * participant has prepared + executed the transaction, which is
+   * effectively committed-on-synchronizer for our purposes. A future
+   * version may swap this for an explicit submit-and-wait endpoint that
+   * polls `/v2/updates/flats` for the completion offset before
+   * resolving.
+   *
+   * `opts.mode` is ignored per the canonical contract — this method
+   * always behaves as `WAIT`. Callers wanting fire-and-forget should
+   * use {@link submitTransaction}.
+   */
   async submitAndWaitForTransaction(opts: SubmitOptions): Promise<SubmitResult> {
     this.assertConnected();
     if (opts.commands.length === 0) {
@@ -318,11 +339,29 @@ export class ZoffProvider implements CantonWalletProvider {
         'SubmitOptions.commands must be non-empty'
       );
     }
-    throw walletError('UNKNOWN', STUB_MESSAGE, {
-      method: 'submitAndWaitForTransaction',
-    });
+
+    const popupResult = await this.runSubmitPopup(opts);
+
+    const result: SubmitResult =
+      popupResult.completionOffset !== undefined
+        ? {
+            updateId: popupResult.transactionId,
+            completionOffset: String(popupResult.completionOffset),
+          }
+        : { updateId: popupResult.transactionId };
+
+    return result;
   }
 
+  /**
+   * Submit a transaction and resolve as soon as the validator accepts
+   * it; the eventual outcome is delivered to listeners registered via
+   * {@link onTransactionUpdate}. v0.1.0 fires a synthetic `COMMITTED`
+   * event immediately after the submit popup resolves, since our
+   * backend's `/tx/execute` semantics are effectively committed-by-
+   * the-time-it-returns. v0.2.0 will distinguish the two phases via a
+   * capability-token-aware async update channel.
+   */
   async submitTransaction(
     opts: SubmitOptions
   ): Promise<{ readonly submissionId: string }> {
@@ -333,11 +372,109 @@ export class ZoffProvider implements CantonWalletProvider {
         'SubmitOptions.commands must be non-empty'
       );
     }
-    throw walletError('UNKNOWN', STUB_MESSAGE, { method: 'submitTransaction' });
+
+    const popupResult = await this.runSubmitPopup(opts);
+    const submissionId = popupResult.transactionId;
+
+    // Synthetic COMMITTED notification — see method docstring.
+    queueMicrotask(() => {
+      const update: TransactionUpdate = {
+        commandId: submissionId,
+        submissionId,
+        updateId: popupResult.transactionId,
+        status: 'COMMITTED',
+      };
+      this.emitTransactionUpdate(update);
+    });
+
+    return { submissionId };
   }
 
-  onTransactionUpdate(_callback: (update: TransactionUpdate) => void): () => void {
-    throw walletError('UNKNOWN', STUB_MESSAGE, { method: 'onTransactionUpdate' });
+  /**
+   * Register a listener for asynchronous transaction updates. v0.1.0
+   * only emits `COMMITTED` from {@link submitTransaction} synchronously
+   * after `/tx/execute` resolves; future versions will deliver
+   * `PENDING` and `FAILED` events as well. Returns an unsubscribe
+   * function. Multiple listeners are supported; each receives every
+   * update.
+   */
+  onTransactionUpdate(
+    callback: (update: TransactionUpdate) => void
+  ): () => void {
+    this.transactionListeners.add(callback);
+    return () => {
+      this.transactionListeners.delete(callback);
+    };
+  }
+
+  private emitTransactionUpdate(update: TransactionUpdate): void {
+    for (const listener of this.transactionListeners) {
+      try {
+        listener(update);
+      } catch {
+        // Listener errors are isolated — never let a buggy listener
+        // crash the SDK or other listeners.
+      }
+    }
+  }
+
+  /**
+   * Shared driver for the `/sdk/sign` popup approval. Used by both
+   * submit methods. Maps the canonical `SubmitOptions` to the
+   * sub-shape `/tx/prepare` accepts (drops `deduplicationKey`, `memo`,
+   * `packageIdSelectionPreference`, `synchronizerId`, `mode` — all
+   * unsupported by the v0.1.0 backend transport; tracked for v0.2.0).
+   */
+  private async runSubmitPopup(
+    opts: SubmitOptions
+  ): Promise<{ transactionId: string; completionOffset?: number }> {
+    if (
+      this._walletOrigin === null ||
+      this._appName === null ||
+      this._partyId === null
+    ) {
+      throw walletError(
+        'NOT_CONNECTED',
+        'Provider state inconsistent — call connect() first.'
+      );
+    }
+
+    const dappOrigin =
+      typeof window !== 'undefined' ? window.location.origin : '';
+    if (dappOrigin === '') {
+      throw walletError(
+        'INVALID_COMMAND',
+        'Submit requires a browser environment with window.location.origin'
+      );
+    }
+
+    const requestId =
+      typeof crypto !== 'undefined' && 'randomUUID' in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+
+    return openSignPopup({
+      walletOrigin: this._walletOrigin,
+      dappOrigin,
+      dappName: this._appName,
+      requestId,
+      payload: {
+        commands: opts.commands,
+        actAs: opts.actAs,
+        ...(opts.readAs !== undefined ? { readAs: opts.readAs } : {}),
+        // DisclosedContract is structured-typed in the canonical interface;
+        // the popup payload accepts the looser open-record shape so it can
+        // forward arbitrary backend-shaped contracts. The runtime data is
+        // identical — we just need to satisfy exactOptionalPropertyTypes.
+        ...(opts.disclosedContracts !== undefined
+          ? {
+              disclosedContracts: opts.disclosedContracts as unknown as ReadonlyArray<
+                Record<string, unknown>
+              >,
+            }
+          : {}),
+      },
+    });
   }
 
   // --- Optional methods (shipped per Toiki 2026-04-27 commitment) ------
