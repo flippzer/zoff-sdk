@@ -58,10 +58,10 @@ The SDK also listens for `canton:requestProvider` and re-announces, so late-regi
 | Network    | v0.1.x | Wallet origin                | Backend origin                    |
 |------------|--------|------------------------------|-----------------------------------|
 | `devnet`   | ✅     | `https://devnet.zoff.app`    | `https://api.devnet.zoff.app`     |
-| `mainnet`  | —      | not supported                | not supported                     |
+| `mainnet`  | ✅     | `https://zoff.app`           | `https://api.zoff.app`            |
 | `testnet`  | —      | not supported                | not supported                     |
 
-`init({network: 'mainnet' | 'testnet'})` throws `WalletError { code: 'INVALID_COMMAND' }`. Mainnet support follows the FeaturedAppRight grant; tracked separately.
+`init({network: 'testnet'})` throws `WalletError { code: 'INVALID_COMMAND' }`. Mainnet origins are wired (added in `0.1.0-rc.3`) so dApps can finalize their integration ahead of the public flag flip — until the wallet flips its maintenance gate, mainnet HTTP calls will surface as `VALIDATOR_ERROR` (backend in mock mode).
 
 ## Errors
 

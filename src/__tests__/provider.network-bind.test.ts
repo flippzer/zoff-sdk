@@ -4,20 +4,15 @@ import { ZoffWalletError } from '../errors.js';
 import { SUPPORTED_NETWORKS } from '../config.js';
 
 describe('ZoffProvider.init() — network bind', () => {
-  it('rejects mainnet with INVALID_COMMAND in v0.1.x', async () => {
+  it('accepts mainnet (added in 0.1.0-rc.3)', async () => {
     const provider = new ZoffProvider();
-    try {
-      await provider.init({ appName: 'test', network: 'mainnet' });
-      throw new Error('expected init to throw');
-    } catch (err) {
-      expect(err).toBeInstanceOf(ZoffWalletError);
-      const e = err as ZoffWalletError;
-      expect(e.code).toBe('INVALID_COMMAND');
-      expect(e.details).toMatchObject({
-        requestedNetwork: 'mainnet',
-        supportedNetworks: SUPPORTED_NETWORKS,
-      });
-    }
+    await expect(
+      provider.init({ appName: 'test', network: 'mainnet' })
+    ).resolves.toBeUndefined();
+    expect(SUPPORTED_NETWORKS).toContain('mainnet');
+    // Touch ZoffWalletError so the import isn't pruned now that the
+    // mainnet-rejection assertion is gone.
+    expect(ZoffWalletError.name).toBe('ZoffWalletError');
   });
 
   it('rejects testnet with INVALID_COMMAND in v0.1.x', async () => {
@@ -27,7 +22,7 @@ describe('ZoffProvider.init() — network bind', () => {
     ).rejects.toMatchObject({ code: 'INVALID_COMMAND' });
   });
 
-  it('accepts devnet (the only supported network in v0.1.x)', async () => {
+  it('accepts devnet', async () => {
     const provider = new ZoffProvider();
     await expect(
       provider.init({ appName: 'test', network: 'devnet' })

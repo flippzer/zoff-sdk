@@ -2,6 +2,25 @@
 
 All notable changes to `@zoffwallet/sdk` are documented here.
 
+## [0.1.0-rc.3] — 2026-04-26
+
+Adds `mainnet` to `SUPPORTED_NETWORKS`. Lets dApps finalize integrations against the canonical `@zoffwallet/sdk` shape ahead of the Zoff mainnet flag flip; calls will surface as `VALIDATOR_ERROR` until the wallet backend exits `canton:mock`.
+
+### Added
+
+- `SUPPORTED_NETWORKS` now includes `'mainnet'` (alongside `'devnet'`). `init({ network: 'mainnet' })` resolves instead of throwing `INVALID_COMMAND`.
+- `NETWORK_TO_WALLET_ORIGIN.mainnet = 'https://zoff.app'`
+- `NETWORK_TO_BACKEND_ORIGIN.mainnet = 'https://api.zoff.app'`
+
+### Changed
+
+- `provider.network-bind.test.ts` — the "rejects mainnet" assertion is gone; replaced by an "accepts mainnet" assertion. `testnet` remains the only unsupported value (still throws `INVALID_COMMAND`).
+- `README.md` — Networks table updated to mark `mainnet` ✅, with a callout that mainnet HTTP calls will fail at the wire layer until Zoff's maintenance gate lifts.
+
+### Notes
+
+This release is interface-conformance, not functional readiness. The backend on `https://api.zoff.app` is currently in `canton:mock` and the frontend is still gated by `NEXT_PUBLIC_MAINTENANCE_MODE=true`. Use `0.1.0-rc.3` to wire your code paths and verify shape; full mainnet operability follows the actual flag flip.
+
 ## [0.1.0-rc.2] — 2026-04-26
 
 Adds `ZoffProvider.withTestingTransport({ autoApprove: true })` for headless CI smoke tests against the popup-approval flows.

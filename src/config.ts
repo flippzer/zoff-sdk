@@ -13,7 +13,7 @@
 import type { SupportedNetwork } from '@zoffwallet/provider-interface';
 
 /** Networks `@zoffwallet/sdk` v0.1.x can be initialized against. */
-export const SUPPORTED_NETWORKS: readonly SupportedNetwork[] = ['devnet'];
+export const SUPPORTED_NETWORKS: readonly SupportedNetwork[] = ['devnet', 'mainnet'];
 
 /**
  * Wallet origin per network — the cross-origin target for approval
@@ -26,7 +26,7 @@ export const NETWORK_TO_WALLET_ORIGIN: Readonly<
   Record<SupportedNetwork, string | undefined>
 > = {
   devnet: 'https://devnet.zoff.app',
-  mainnet: undefined,
+  mainnet: 'https://zoff.app',
   testnet: undefined,
 };
 
@@ -41,7 +41,7 @@ export const NETWORK_TO_BACKEND_ORIGIN: Readonly<
   Record<SupportedNetwork, string | undefined>
 > = {
   devnet: 'https://api.devnet.zoff.app',
-  mainnet: undefined,
+  mainnet: 'https://api.zoff.app',
   testnet: undefined,
 };
 
